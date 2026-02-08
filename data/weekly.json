@@ -1,0 +1,297 @@
+{
+  "generated_at_utc": "2026-02-04T22:38:29.314Z",
+  "week_keys": [
+    "2025-07-23",
+    "2025-07-30",
+    "2025-08-06",
+    "2025-08-13",
+    "2025-08-20",
+    "2025-08-27",
+    "2025-09-03",
+    "2025-09-10",
+    "2025-09-17",
+    "2025-09-24",
+    "2025-10-01",
+    "2025-10-08",
+    "2025-10-15",
+    "2025-10-22",
+    "2025-10-29",
+    "2025-11-05",
+    "2025-11-12",
+    "2025-11-19",
+    "2025-11-26",
+    "2025-12-03",
+    "2025-12-10",
+    "2025-12-17",
+    "2025-12-24",
+    "2025-12-31",
+    "2026-01-07",
+    "2026-01-14",
+    "2026-01-21",
+    "2026-01-28",
+    "2026-02-04"
+  ],
+  "weeks": [
+    {
+      "week_number": 1,
+      "week_label": "Week 1 – 23 Jul 2025",
+      "week_start_date_utc": "2025-07-23 00:00",
+      "week_start_utc": "2025-07-23",
+      "week_end_utc": "2025-07-30",
+      "total_usdc_amount": 11461,
+      "total_unique_users": 2893
+    },
+    {
+      "week_number": 2,
+      "week_label": "Week 2 – 30 Jul 2025",
+      "week_start_date_utc": "2025-07-30 00:00",
+      "week_start_utc": "2025-07-30",
+      "week_end_utc": "2025-08-06",
+      "total_usdc_amount": 12472,
+      "total_unique_users": 2985
+    },
+    {
+      "week_number": 3,
+      "week_label": "Week 3 – 06 Aug 2025",
+      "week_start_date_utc": "2025-08-06 00:00",
+      "week_start_utc": "2025-08-06",
+      "week_end_utc": "2025-08-13",
+      "total_usdc_amount": 13242,
+      "total_unique_users": 3118
+    },
+    {
+      "week_number": 4,
+      "week_label": "Week 4 – 13 Aug 2025",
+      "week_start_date_utc": "2025-08-13 00:00",
+      "week_start_utc": "2025-08-13",
+      "week_end_utc": "2025-08-20",
+      "total_usdc_amount": 12713,
+      "total_unique_users": 3144
+    },
+    {
+      "week_number": 5,
+      "week_label": "Week 5 – 20 Aug 2025",
+      "week_start_date_utc": "2025-08-20 00:00",
+      "week_start_utc": "2025-08-20",
+      "week_end_utc": "2025-08-27",
+      "total_usdc_amount": 12909,
+      "total_unique_users": 3116
+    },
+    {
+      "week_number": 6,
+      "week_label": "Week 6 – 27 Aug 2025",
+      "week_start_date_utc": "2025-08-27 00:00",
+      "week_start_utc": "2025-08-27",
+      "week_end_utc": "2025-09-03",
+      "total_usdc_amount": 12904,
+      "total_unique_users": 3128
+    },
+    {
+      "week_number": 7,
+      "week_label": "Week 7 – 03 Sept 2025",
+      "week_start_date_utc": "2025-09-03 00:00",
+      "week_start_utc": "2025-09-03",
+      "week_end_utc": "2025-09-10",
+      "total_usdc_amount": 12997,
+      "total_unique_users": 3205
+    },
+    {
+      "week_number": 8,
+      "week_label": "Week 8 – 10 Sept 2025",
+      "week_start_date_utc": "2025-09-10 00:00",
+      "week_start_utc": "2025-09-10",
+      "week_end_utc": "2025-09-17",
+      "total_usdc_amount": 23908,
+      "total_unique_users": 3363
+    },
+    {
+      "week_number": 9,
+      "week_label": "Week 9 – 17 Sept 2025",
+      "week_start_date_utc": "2025-09-17 00:00",
+      "week_start_utc": "2025-09-17",
+      "week_end_utc": "2025-09-24",
+      "total_usdc_amount": 23445,
+      "total_unique_users": 3389
+    },
+    {
+      "week_number": 10,
+      "week_label": "Week 10 – 24 Sept 2025",
+      "week_start_date_utc": "2025-09-24 00:00",
+      "week_start_utc": "2025-09-24",
+      "week_end_utc": "2025-10-01",
+      "total_usdc_amount": 23462,
+      "total_unique_users": 3357
+    },
+    {
+      "week_number": 11,
+      "week_label": "Week 11 – 01 Oct 2025",
+      "week_start_date_utc": "2025-10-01 00:00",
+      "week_start_utc": "2025-10-01",
+      "week_end_utc": "2025-10-08",
+      "total_usdc_amount": 23411,
+      "total_unique_users": 3378
+    },
+    {
+      "week_number": 12,
+      "week_label": "Week 12 – 08 Oct 2025",
+      "week_start_date_utc": "2025-10-08 00:00",
+      "week_start_utc": "2025-10-08",
+      "week_end_utc": "2025-10-15",
+      "total_usdc_amount": 23308,
+      "total_unique_users": 3363
+    },
+    {
+      "week_number": 13,
+      "week_label": "Week 13 – 15 Oct 2025",
+      "week_start_date_utc": "2025-10-15 00:00",
+      "week_start_utc": "2025-10-15",
+      "week_end_utc": "2025-10-22",
+      "total_usdc_amount": 27168,
+      "total_unique_users": 3367
+    },
+    {
+      "week_number": 14,
+      "week_label": "Week 14 – 22 Oct 2025",
+      "week_start_date_utc": "2025-10-22 00:00",
+      "week_start_utc": "2025-10-22",
+      "week_end_utc": "2025-10-29",
+      "total_usdc_amount": 23123,
+      "total_unique_users": 3334
+    },
+    {
+      "week_number": 15,
+      "week_label": "Week 15 – 29 Oct 2025",
+      "week_start_date_utc": "2025-10-29 00:00",
+      "week_start_utc": "2025-10-29",
+      "week_end_utc": "2025-11-05",
+      "total_usdc_amount": 23154,
+      "total_unique_users": 3324
+    },
+    {
+      "week_number": 16,
+      "week_label": "Week 16 – 05 Nov 2025",
+      "week_start_date_utc": "2025-11-05 00:00",
+      "week_start_utc": "2025-11-05",
+      "week_end_utc": "2025-11-12",
+      "total_usdc_amount": 12725,
+      "total_unique_users": 1987
+    },
+    {
+      "week_number": 17,
+      "week_label": "Week 17 – 12 Nov 2025",
+      "week_start_date_utc": "2025-11-12 00:00",
+      "week_start_utc": "2025-11-12",
+      "week_end_utc": "2025-11-19",
+      "total_usdc_amount": 12514,
+      "total_unique_users": 1951
+    },
+    {
+      "week_number": 18,
+      "week_label": "Week 18 – 19 Nov 2025",
+      "week_start_date_utc": "2025-11-19 00:00",
+      "week_start_utc": "2025-11-19",
+      "week_end_utc": "2025-11-26",
+      "total_usdc_amount": 12562,
+      "total_unique_users": 1948
+    },
+    {
+      "week_number": 19,
+      "week_label": "Week 19 – 26 Nov 2025",
+      "week_start_date_utc": "2025-11-26 00:00",
+      "week_start_utc": "2025-11-26",
+      "week_end_utc": "2025-12-03",
+      "total_usdc_amount": 12708,
+      "total_unique_users": 1950
+    },
+    {
+      "week_number": 20,
+      "week_label": "Week 20 – 03 Dec 2025",
+      "week_start_date_utc": "2025-12-03 00:00",
+      "week_start_utc": "2025-12-03",
+      "week_end_utc": "2025-12-10",
+      "total_usdc_amount": 12433,
+      "total_unique_users": 1945
+    },
+    {
+      "week_number": 21,
+      "week_label": "Week 21 – 10 Dec 2025",
+      "week_start_date_utc": "2025-12-10 00:00",
+      "week_start_utc": "2025-12-10",
+      "week_end_utc": "2025-12-17",
+      "total_usdc_amount": 12610,
+      "total_unique_users": 1941
+    },
+    {
+      "week_number": 22,
+      "week_label": "Week 22 – 17 Dec 2025",
+      "week_start_date_utc": "2025-12-17 00:00",
+      "week_start_utc": "2025-12-17",
+      "week_end_utc": "2025-12-24",
+      "total_usdc_amount": 12293,
+      "total_unique_users": 1946
+    },
+    {
+      "week_number": 23,
+      "week_label": "Week 23 – 24 Dec 2025",
+      "week_start_date_utc": "2025-12-24 00:00",
+      "week_start_utc": "2025-12-24",
+      "week_end_utc": "2025-12-31",
+      "total_usdc_amount": 12909,
+      "total_unique_users": 1959
+    },
+    {
+      "week_number": 24,
+      "week_label": "Week 24 – 31 Dec 2025",
+      "week_start_date_utc": "2025-12-31 00:00",
+      "week_start_utc": "2025-12-31",
+      "week_end_utc": "2026-01-07",
+      "total_usdc_amount": 12146,
+      "total_unique_users": 1951
+    },
+    {
+      "week_number": 25,
+      "week_label": "Week 25 – 07 Jan 2026",
+      "week_start_date_utc": "2026-01-07 00:00",
+      "week_start_utc": "2026-01-07",
+      "week_end_utc": "2026-01-14",
+      "total_usdc_amount": 12280,
+      "total_unique_users": 1947
+    },
+    {
+      "week_number": 26,
+      "week_label": "Week 26 – 14 Jan 2026",
+      "week_start_date_utc": "2026-01-14 00:00",
+      "week_start_utc": "2026-01-14",
+      "week_end_utc": "2026-01-21",
+      "total_usdc_amount": 12544,
+      "total_unique_users": 1956
+    },
+    {
+      "week_number": 27,
+      "week_label": "Week 27 – 21 Jan 2026",
+      "week_start_date_utc": "2026-01-21 00:00",
+      "week_start_utc": "2026-01-21",
+      "week_end_utc": "2026-01-28",
+      "total_usdc_amount": 12385,
+      "total_unique_users": 1955
+    },
+    {
+      "week_number": 28,
+      "week_label": "Week 28 – 28 Jan 2026",
+      "week_start_date_utc": "2026-01-28 00:00",
+      "week_start_utc": "2026-01-28",
+      "week_end_utc": "2026-02-04",
+      "total_usdc_amount": 12390,
+      "total_unique_users": 1945
+    },
+    {
+      "week_number": 29,
+      "week_label": "Week 29 – 04 Feb 2026",
+      "week_start_date_utc": "2026-02-04 00:00",
+      "week_start_utc": "2026-02-04",
+      "week_end_utc": "2026-02-11",
+      "total_usdc_amount": 12381,
+      "total_unique_users": 1939
+    }
+  ]
+}

@@ -35,78 +35,37 @@ let dataCache = {
 };
 
 /**
- * Fetch data from Vercel deployment
- */
-async function fetchDataFromVercel(filename) {
-  const miniappUrl = process.env.MINIAPP_URL || 'https://baseapp-reward-dashboard.vercel.app';
-  const url = `${miniappUrl}/${filename}`;
-  
-  try {
-    console.log(`📥 Fetching ${filename} from Vercel...`);
-    const response = await fetch(url);
-    
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
-    
-    const data = await response.json();
-    
-    // Save to local file for backup
-    const dataDir = process.env.DATA_DIR || './data';
-    await fs.mkdir(dataDir, { recursive: true });
-    await fs.writeFile(
-      path.join(dataDir, path.basename(filename)),
-      JSON.stringify(data, null, 2)
-    );
-    
-    return data;
-  } catch (error) {
-    console.error(`⚠️  Failed to fetch ${filename} from Vercel:`, error.message);
-    
-    // Try to load from local backup
-    try {
-      const dataDir = process.env.DATA_DIR || './data';
-      const localData = await fs.readFile(
-        path.join(dataDir, path.basename(filename)),
-        'utf-8'
-      );
-      console.log(`   → Using local backup for ${filename}`);
-      return JSON.parse(localData);
-    } catch (localError) {
-      throw new Error(`Failed to load ${filename} from Vercel or local backup`);
-    }
-  }
-}
-
-/**
- * Load data from Vercel (with local backup fallback)
+ * Load data from local JSON files (bundled with bot)
  */
 async function loadData() {
   try {
-    console.log('🔄 Loading data from Vercel...');
+    console.log('🔄 Loading data from local files...');
+    
+    const dataDir = process.env.DATA_DIR || './data';
     
     const [overview, allTime, weekly, farcaster] = await Promise.all([
-      fetchDataFromVercel('data/overview.json'),
-      fetchDataFromVercel('data/leaderboard_all_time.json'),
-      fetchDataFromVercel('data/leaderboard_weekly_latest.json'),
-      fetchDataFromVercel('data/farcaster_map.json'),
+      fs.readFile(path.join(dataDir, 'overview.json'), 'utf-8'),
+      fs.readFile(path.join(dataDir, 'leaderboard_all_time.json'), 'utf-8'),
+      fs.readFile(path.join(dataDir, 'leaderboard_weekly_latest.json'), 'utf-8'),
+      fs.readFile(path.join(dataDir, 'farcaster_map.json'), 'utf-8'),
     ]);
 
     dataCache = {
-      overview: overview,
-      allTimeLeaderboard: allTime,
-      weeklyLeaderboard: weekly,
-      farcasterMap: farcaster,
+      overview: JSON.parse(overview),
+      allTimeLeaderboard: JSON.parse(allTime),
+      weeklyLeaderboard: JSON.parse(weekly),
+      farcasterMap: JSON.parse(farcaster),
       lastUpdated: new Date(),
     };
 
-    console.log('✅ Data loaded successfully');
+    console.log('✅ Data loaded successfully from local files');
     console.log(`   - Total users: ${dataCache.overview.all_time.unique_users}`);
     console.log(`   - All-time rewards: $${dataCache.overview.all_time.total_usdc}`);
     console.log(`   - Latest week: $${dataCache.overview.latest_week.total_usdc}`);
     console.log(`   - Last updated: ${dataCache.lastUpdated.toISOString()}`);
   } catch (error) {
     console.error('❌ Error loading data:', error.message);
+    console.error('   Make sure JSON files exist in the data/ folder!');
     throw error;
   }
 }
