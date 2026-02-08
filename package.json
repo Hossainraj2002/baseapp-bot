@@ -1,0 +1,32 @@
+{
+  "name": "baseapp-intelligent-bot",
+  "version": "1.0.0",
+  "description": "Intelligent Twitter bot for BaseApp rewards with data integration",
+  "type": "module",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "dev": "node --watch bot.js",
+    "test": "node test.js",
+    "update-data": "node scripts/fetch-data.js"
+  },
+  "keywords": [
+    "twitter",
+    "bot",
+    "ai",
+    "baseapp",
+    "rewards",
+    "farcaster"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.32.1",
+    "twitter-api-v2": "^1.17.2",
+    "dotenv": "^16.4.7",
+    "node-fetch": "^3.3.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.9"
+  }
+}

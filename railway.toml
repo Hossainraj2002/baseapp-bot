@@ -1,0 +1,13 @@
+version: "3"
+
+services:
+  bot:
+    name: baseapp-bot
+    build:
+      builder: nixpacks
+    start:
+      command: npm start
+    environment:
+      NODE_ENV: production
+    healthcheck:
+      enabled: false
