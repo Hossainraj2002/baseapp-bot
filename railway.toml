@@ -1,13 +1,6 @@
-version: "3"
+[build]
 
-services:
-  bot:
-    name: baseapp-bot
-    build:
-      builder: nixpacks
-    start:
-      command: npm start
-    environment:
-      NODE_ENV: production
-    healthcheck:
-      enabled: false
+[deploy]
+startCommand = "npm start"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 10
