@@ -1,18 +1,11 @@
-// ================================================================
-// BASEAPP ULTIMATE BOT - Production Ready
-// All fixes: state persistence, exact miniapp logic, daily posts
-// ================================================================
-
-import { TwitterApi } from 'twitter-api-v2';
 import Anthropic from '@anthropic-ai/sdk';
-import cron from 'node-cron';
+import { TwitterApi } from 'twitter-api-v2';
 import dotenv from 'dotenv';
 import fs from 'fs/promises';
 import path from 'path';
+import cron from 'node-cron';
 
 dotenv.config();
-
-// ===== CONFIGURATION =====
 const CONFIG = {
   PLATFORM_NAME: 'BaseApp',
   MINIAPP_LINK: 'Visit Baseapp reward dashboard miniapp on @baseapp:\nhttps://base.app/app/baseapp-reward-dashboard.vercel.app',
@@ -26,23 +19,157 @@ const CONFIG = {
   
   ACTIVITY_CACHE_TTL: 15 * 60 * 1000,
 };
+/**
+ * ========================================================
+ * BRAND + LINK RULES (DO NOT VIOLATE)
+ * ========================================================
+ * - Never output the word "Farcaster" in any reply/post.
+ * - User-facing copy must say BaseApp / BaseApp activity / BaseApp profile.
+ * - Footer link must be appended to every non-help, non-clarification reply.
+ */
 
-// ===== CLIENTS =====
-const twitter = new TwitterApi({
+const FOOTER = [
+  'Visit Baseapp reward dashboard miniapp on @baseapp:',
+  'https://base.app/app/baseapp-reward-dashboard.vercel.app',
+].join('\n');
+
+const HELP_TEXT = (mentionUsername) => [
+  `Hey @${mentionUsername}! I'm here to help with BaseApp rewards and social info! 🎯`,
+  '',
+  'Try these:',
+  '• show data for [baseapp username]',
+  '• weekly — weekly leaderboard',
+  '• alltime — alltime leaderboard',
+  '• reward — overall distribution info',
+  '• breakdown — latest week reward breakdown',
+  '',
+  'What would you like to know? 🚀',
+].join('\n');
+
+function mustHaveFooter(kind) {
+  // kind: 'help' | 'clarify' | 'normal'
+  return kind === 'normal';
+}
+
+function appendFooter(text, kind) {
+  if (!mustHaveFooter(kind)) return text;
+  if (text.includes(FOOTER)) return text;
+  return `${text}\n\n${FOOTER}`;
+}
+
+function utcDateYmd(d = new Date()) {
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(d.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function isoAtUtcMidnight(dateStrYmd) {
+  // "2026-02-04" -> "2026-02-04T00:00:00Z"
+  return `${dateStrYmd}T00:00:00Z`;
+}
+
+function addDaysIso(iso, days) {
+  const ms = Date.parse(iso);
+  if (!Number.isFinite(ms)) return iso;
+  const out = new Date(ms + days * 24 * 60 * 60 * 1000);
+  return out.toISOString();
+}
+
+function formatMoney(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return String(v ?? '0');
+  // no trailing .00 if int
+  return n % 1 === 0 ? String(n.toFixed(0)) : String(n.toFixed(2));
+}
+
+function arrowPct(pctStr) {
+  if (!pctStr) return '—';
+  const n = Number(pctStr);
+  if (!Number.isFinite(n)) return '—';
+  const arrow = n > 0 ? '⬆️' : (n < 0 ? '⬇️' : '➡️');
+  const sign = n > 0 ? '+' : '';
+  return `${arrow} ${sign}${n.toFixed(2)}%`;
+}
+
+function normalizeIdentifier(raw) {
+  if (!raw) return '';
+  let s = String(raw).trim().toLowerCase();
+
+  // strip surrounding punctuation
+  s = s.replace(/^[^a-z0-9@]+/g, '');
+  s = s.replace(/[^a-z0-9.:-]+$/g, '');
+
+  // remove leading @
+  s = s.replace(/^@+/, '');
+
+  // remove embedded punctuation around tokens (common in sentences)
+  s = s.replace(/[,\)\]\}]+$/g, '');
+  s = s.replace(/^[\(\[\{]+/g, '');
+
+  return s.trim();
+}
+
+function baseName(usernameOrToken) {
+  const s = normalizeIdentifier(usernameOrToken);
+  // femiii.base.eth -> femiii
+  // femiii.eth -> femiii
+  // femiii -> femiii
+  return s.split('.')[0] || s;
+}
+
+function isEthAddress(s) {
+  return /^0x[a-f0-9]{40}$/.test(normalizeIdentifier(s));
+}
+
+function extractFirstIdentifier(message) {
+  const text = String(message || '');
+
+  // 0x...
+  const addr = text.match(/0x[a-fA-F0-9]{40}/);
+  if (addr) return { kind: 'address', value: normalizeIdentifier(addr[0]) };
+
+  // Prefer explicit BaseApp usernames (with .eth suffix) or explicit @mentions.
+  // This avoids treating casual words like "hi" as a username.
+  const u = text.match(/@?[\w-]+(?:\.base\.eth|\.eth)/i); // require .eth suffix
+  if (u) return { kind: 'username', value: normalizeIdentifier(u[0]) };
+
+  const at = text.match(/@[\w-]+/i); // allow @name (no .eth)
+  if (at) return { kind: 'username', value: normalizeIdentifier(at[0]) };
+
+  return { kind: 'none', value: '' };
+}
+
+/**
+ * ========================================================
+ * Twitter client
+ * ========================================================
+ */
+const client = new TwitterApi({
   appKey: process.env.TWITTER_API_KEY,
   appSecret: process.env.TWITTER_API_SECRET,
   accessToken: process.env.TWITTER_ACCESS_TOKEN,
   accessSecret: process.env.TWITTER_ACCESS_TOKEN_SECRET,
 });
+const rwClient = client.readWrite;
 
-const rwClient = twitter.readWrite;
-
+/**
+ * ========================================================
+ * Anthropic (GENERAL CHAT ONLY; must not decide identity matching)
+ * ========================================================
+ */
 const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
 });
 
-// ===== STATE =====
-let state = {
+/**
+ * ========================================================
+ * Persistent State (Fix Issue #1)
+ * ========================================================
+ */
+const STATE_PATH = process.env.STATE_FILE || './state.json';
+
+const DEFAULT_STATE = {
   lastMentionId: null,
   processedMentionIds: [],
   latestWeekStartUtc: null,
@@ -54,101 +181,340 @@ let state = {
   },
 };
 
+let state = structuredClone(DEFAULT_STATE);
+
+async function atomicWriteJson(filePath, obj) {
+  const tmp = `${filePath}.tmp`;
+  await fs.writeFile(tmp, JSON.stringify(obj, null, 2), 'utf-8');
+  await fs.rename(tmp, filePath);
+}
+
+async function loadState() {
+  try {
+    const raw = await fs.readFile(STATE_PATH, 'utf-8');
+    const parsed = JSON.parse(raw);
+    state = {
+      ...structuredClone(DEFAULT_STATE),
+      ...parsed,
+      dailyPost: {
+        ...structuredClone(DEFAULT_STATE.dailyPost),
+        ...(parsed.dailyPost || {}),
+      },
+    };
+  } catch (e) {
+    // create fresh state file
+    state = structuredClone(DEFAULT_STATE);
+    await atomicWriteJson(STATE_PATH, state);
+  }
+}
+
+async function persistState() {
+  await atomicWriteJson(STATE_PATH, state);
+}
+
+function rememberProcessedMention(id) {
+  if (!id) return;
+  if (!state.processedMentionIds.includes(id)) state.processedMentionIds.push(id);
+  // keep bounded to avoid unbounded growth
+  const MAX = Number(process.env.MAX_PROCESSED_MENTIONS || 5000);
+  if (state.processedMentionIds.length > MAX) {
+    state.processedMentionIds = state.processedMentionIds.slice(-MAX);
+  }
+}
+
+/**
+ * ========================================================
+ * Local Data Cache
+ * ========================================================
+ */
 let dataCache = {
   overview: null,
   allTimeLeaderboard: null,
   weeklyLeaderboard: null,
-  farcasterMap: null,
-  weekly: null,
+  weeklyMeta: null,
+  farcasterMap: null, // local user map (keep internal naming; not user-facing)
+  lastUpdated: null,
+
+  // indexes
+  byUsername: new Map(),      // normalized full username => record
+  byBaseName: new Map(),      // baseName => [record,...]
+  byVerifiedAddr: new Map(),  // verified eth address => record
 };
 
-const activityCache = new Map();
-
-async function loadState() {
-  try {
-    const data = await fs.readFile(CONFIG.STATE_FILE, 'utf-8');
-    state = JSON.parse(data);
-    console.log('✅ State loaded');
-  } catch {
-    console.log('📝 New state');
-    await saveState();
-  }
-}
-
-async function saveState() {
-  try {
-    await fs.writeFile(CONFIG.STATE_FILE, JSON.stringify(state, null, 2));
-  } catch (error) {
-    console.error('❌ Save state failed:', error.message);
-  }
-}
-
 async function loadData() {
-  try {
-    console.log('🔄 Loading data...');
-    
-    const dataDir = process.env.DATA_DIR || './data';
-    
-    const [overview, allTime, weekly, farcaster, weeklyMeta] = await Promise.all([
-      fs.readFile(path.join(dataDir, 'overview.json'), 'utf-8'),
-      fs.readFile(path.join(dataDir, 'leaderboard_all_time.json'), 'utf-8'),
-      fs.readFile(path.join(dataDir, 'leaderboard_weekly_latest.json'), 'utf-8'),
-      fs.readFile(path.join(dataDir, 'farcaster_map.json'), 'utf-8'),
-      fs.readFile(path.join(dataDir, 'weekly.json'), 'utf-8'),
-    ]);
+  console.log('🔄 Loading data from local files...');
+  const dataDir = process.env.DATA_DIR || './data';
 
-    dataCache = {
-      overview: JSON.parse(overview),
-      allTimeLeaderboard: JSON.parse(allTime),
-      weeklyLeaderboard: JSON.parse(weekly),
-      farcasterMap: JSON.parse(farcaster),
-      weekly: JSON.parse(weeklyMeta),
+  const [overview, allTime, weeklyLatest, weeklyMeta, farcaster] = await Promise.all([
+    fs.readFile(path.join(dataDir, 'overview.json'), 'utf-8'),
+    fs.readFile(path.join(dataDir, 'leaderboard_all_time.json'), 'utf-8'),
+    fs.readFile(path.join(dataDir, 'leaderboard_weekly_latest.json'), 'utf-8'),
+    fs.readFile(path.join(dataDir, 'weekly.json'), 'utf-8'),
+    fs.readFile(path.join(dataDir, 'farcaster_map.json'), 'utf-8'),
+  ]);
+
+  dataCache.overview = JSON.parse(overview);
+  dataCache.allTimeLeaderboard = JSON.parse(allTime);
+  dataCache.weeklyLeaderboard = JSON.parse(weeklyLatest);
+  dataCache.weeklyMeta = JSON.parse(weeklyMeta);
+  dataCache.farcasterMap = JSON.parse(farcaster);
+  dataCache.lastUpdated = new Date();
+
+  buildIndexes();
+
+  // Keep a copy in state for autopost week-change detection
+  const latestWeekStart = dataCache.weeklyLeaderboard?.latest_week_start_utc || null;
+  if (latestWeekStart && state.latestWeekStartUtc !== latestWeekStart) {
+    state.latestWeekStartUtc = latestWeekStart;
+    await persistState();
+  }
+
+  console.log('✅ Data loaded');
+}
+
+function buildIndexes() {
+  dataCache.byUsername = new Map();
+  dataCache.byBaseName = new Map();
+  dataCache.byVerifiedAddr = new Map();
+
+  for (const [rewardAddrRaw, userData] of Object.entries(dataCache.farcasterMap || {})) {
+    if (!userData || userData.status !== 'ok') continue;
+
+    const rewardAddr = normalizeIdentifier(rewardAddrRaw);
+    const username = normalizeIdentifier(userData.username || '');
+    const bname = baseName(username);
+
+    const rec = {
+      rewardAddressKey: rewardAddr, // address key in local map
+      fid: userData.fid,
+      username, // full username like femiii.base.eth
+      display_name: userData.display_name || null,
+      follower_count: userData.follower_count ?? null,
+      following_count: userData.following_count ?? null,
+      verified_eth_addresses: (userData.verified_addresses?.eth_addresses || userData.verifications || [])
+        .map((a) => normalizeIdentifier(a))
+        .filter((a) => isEthAddress(a)),
+      raw: userData,
     };
 
-    console.log('✅ Data loaded');
-    
-    const latestWeek = dataCache.weeklyLeaderboard.latest_week_start_utc;
-    if (latestWeek !== state.latestWeekStartUtc) {
-      console.log(`📅 New week: ${latestWeek}`);
-      state.latestWeekStartUtc = latestWeek;
-      state.dailyPost.weekStartUtc = latestWeek;
-      state.dailyPost.cursor = 0;
-      await saveState();
+    if (username) dataCache.byUsername.set(username, rec);
+
+    if (bname) {
+      const arr = dataCache.byBaseName.get(bname) || [];
+      arr.push(rec);
+      dataCache.byBaseName.set(bname, arr);
     }
-    
-  } catch (error) {
-    console.error('❌ Data load failed:', error.message);
-    throw error;
+
+    // Reward key itself should be searchable
+    if (isEthAddress(rewardAddr)) {
+      dataCache.byVerifiedAddr.set(rewardAddr, rec);
+    }
+    for (const a of rec.verified_eth_addresses) {
+      if (!dataCache.byVerifiedAddr.has(a)) dataCache.byVerifiedAddr.set(a, rec);
+    }
   }
 }
 
-// ===== NEYNAR (EXACT MINIAPP LOGIC) =====
+function getWeekMetaByStart(weekStartUtcYmd) {
+  const weeks = dataCache.weeklyMeta?.weeks || [];
+  return weeks.find((w) => w.week_start_utc === weekStartUtcYmd) || null;
+}
 
-async function searchNeynarUser(query) {
+function getLeaderboardAllTimeEntry(address) {
+  const rows = dataCache.allTimeLeaderboard?.rows || [];
+  const a = normalizeIdentifier(address);
+  return rows.find((r) => normalizeIdentifier(r.address) === a) || null;
+}
+
+function getLeaderboardWeeklyEntry(address) {
+  const rows = dataCache.weeklyLeaderboard?.rows || [];
+  const a = normalizeIdentifier(address);
+  return rows.find((r) => normalizeIdentifier(r.address) === a) || null;
+}
+
+function pickRewardAddress(rec) {
+  // prefer an eth address that exists in rewards data
+  const candidates = [
+    rec.rewardAddressKey,
+    ...(rec.verified_eth_addresses || []),
+  ].filter((a) => isEthAddress(a));
+
+  const scored = candidates.map((a) => {
+    const all = getLeaderboardAllTimeEntry(a);
+    const weekly = getLeaderboardWeeklyEntry(a);
+    const allUsd = all ? Number(all.total_usdc) : 0;
+    const weeklyUsd = weekly ? Number(weekly.this_week_usdc) : 0;
+    return { addr: a, score: (Number.isFinite(allUsd) ? allUsd : 0) * 1000 + (Number.isFinite(weeklyUsd) ? weeklyUsd : 0) };
+  });
+
+  scored.sort((x, y) => y.score - x.score);
+
+  // prefer addresses present in any leaderboard; else keep original rewardAddressKey
+  for (const s of scored) {
+    if (getLeaderboardAllTimeEntry(s.addr) || getLeaderboardWeeklyEntry(s.addr)) return s.addr;
+  }
+  return rec.rewardAddressKey;
+}
+
+function resolveUserLocal(identifierRaw) {
+  const identifier = normalizeIdentifier(identifierRaw);
+  if (!identifier) return { ok: false, reason: 'missing' };
+
+  if (isEthAddress(identifier)) {
+    const rec = dataCache.byVerifiedAddr.get(identifier);
+    if (!rec) return { ok: false, reason: 'not_found' };
+    return {
+      ok: true,
+      rec,
+      rewardAddress: pickRewardAddress(rec),
+    };
+  }
+
+  // 1) exact normalized full username
+  if (dataCache.byUsername.has(identifier)) {
+    const rec = dataCache.byUsername.get(identifier);
+    return { ok: true, rec, rewardAddress: pickRewardAddress(rec) };
+  }
+
+  // 2) baseName match (must be unique)
+  const b = baseName(identifier);
+  const matches = dataCache.byBaseName.get(b) || [];
+  if (matches.length === 1) {
+    const rec = matches[0];
+    return { ok: true, rec, rewardAddress: pickRewardAddress(rec) };
+  }
+  if (matches.length > 1) {
+    return { ok: false, reason: 'ambiguous_base', base: b, count: matches.length };
+  }
+
+  return { ok: false, reason: 'not_found' };
+}
+
+/**
+ * ========================================================
+ * Neynar lookups (fallback only)
+ * ========================================================
+ */
+async function neynarGet(url) {
   const apiKey = process.env.NEYNAR_API_KEY;
-  if (!apiKey) return null;
+  if (!apiKey) throw new Error('Missing NEYNAR_API_KEY');
+  const res = await fetch(url, {
+    headers: {
+      accept: 'application/json',
+      api_key: apiKey,
+      'x-api-key': apiKey, // some docs use x-api-key; harmless to include both
+    },
+  });
+  return res;
+}
 
+async function resolveUserNeynar(identifierRaw) {
+  // Fallback: try exact by_username, then search
+  const identifier = normalizeIdentifier(identifierRaw);
+  if (!identifier) return { ok: false, reason: 'missing' };
+
+  // 1) exact username lookup
   try {
-    const response = await fetch(
-      `https://api.neynar.com/v2/farcaster/user/search?q=${encodeURIComponent(query)}&limit=10`,
-      {
-        headers: { 'accept': 'application/json', 'api_key': apiKey },
-      }
-    );
-
-    if (!response.ok) return null;
-    const data = await response.json();
-    return data.result?.users || [];
+    const url = new URL('https://api.neynar.com/v2/farcaster/user/by_username');
+    url.searchParams.set('username', identifier);
+    const res = await neynarGet(url.toString());
+    if (res.ok) {
+      const json = await res.json();
+      const user = json?.user;
+      if (user?.fid) return { ok: true, user };
+    }
   } catch {
+    // continue
+  }
+
+  // 2) search endpoint (best-effort; API name in docs is "search-user")
+  try {
+    const url = new URL('https://api.neynar.com/v2/farcaster/user/search');
+    url.searchParams.set('q', identifier);
+    url.searchParams.set('limit', '5');
+    const res = await neynarGet(url.toString());
+    if (res.ok) {
+      const json = await res.json();
+      const users = json?.result?.users || json?.users || [];
+      if (Array.isArray(users) && users.length) {
+        const norm = normalizeIdentifier(identifier);
+        const b = baseName(norm);
+
+        // choose best match: exact username, then baseName, else no guess
+        const exact = users.find((u) => normalizeIdentifier(u?.username) === norm);
+        if (exact) return { ok: true, user: exact };
+
+        const base = users.find((u) => baseName(u?.username || '') === b);
+        if (base) return { ok: true, user: base };
+
+        return { ok: false, reason: 'no_confident_match' };
+      }
+    }
+  } catch {
+    // continue
+  }
+
+  return { ok: false, reason: 'not_found' };
+}
+
+/**
+ * ========================================================
+ * BaseApp activity metrics (mirrors miniapp route exactly)
+ * ========================================================
+ */
+const socialCache = new Map(); // key => { expiresAt, value }
+
+function socialCacheGet(key) {
+  const entry = socialCache.get(key);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    socialCache.delete(key);
     return null;
   }
+  return entry.value;
 }
 
-async function fetchUserCasts(fid, apiKey, startMs, endMs) {
+function socialCacheSet(key, value, ttlMs) {
+  socialCache.set(key, { value, expiresAt: Date.now() + ttlMs });
+}
+
+function safeNum(v) {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function parseMs(iso) {
+  const ms = Date.parse(iso);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function castCreatedMs(cast) {
+  const createdAt =
+    cast?.created_at ??
+    cast?.cast?.created_at ??
+    cast?.timestamp ??
+    cast?.cast?.timestamp;
+  if (!createdAt) return null;
+  return parseMs(createdAt);
+}
+
+function extractCounts(cast) {
+  const reactions = cast?.reactions || {};
+  const repliesObj = cast?.replies || {};
+  const likes = safeNum(reactions.likes_count);
+  const recasts = safeNum(reactions.recasts_count) || safeNum(reactions.recasts) || safeNum(reactions.recastsCount);
+  const replies = safeNum(repliesObj.count);
+  return { likes, recasts, replies };
+}
+
+async function fetchUserCasts(fid, startMs, endMs) {
+  const apiKey = process.env.NEYNAR_API_KEY;
+  if (!apiKey) throw new Error('Missing NEYNAR_API_KEY');
+
   const casts = [];
   let cursor = null;
 
-  for (let page = 0; page < 20; page++) {
+  for (let page = 0; page < 20; page += 1) {
     const url = new URL('https://api.neynar.com/v2/farcaster/feed/user/casts');
     url.searchParams.set('fid', String(fid));
     url.searchParams.set('limit', '100');
@@ -157,821 +523,716 @@ async function fetchUserCasts(fid, apiKey, startMs, endMs) {
     if (cursor) url.searchParams.set('cursor', cursor);
 
     const res = await fetch(url.toString(), {
-      headers: { 'accept': 'application/json', 'api_key': apiKey },
+      headers: {
+        accept: 'application/json',
+        api_key: apiKey,
+        'x-api-key': apiKey,
+      },
     });
 
-    if (!res.ok) break;
+    if (!res.ok) throw new Error(`Neynar error: ${res.status}`);
 
     const json = await res.json();
-    const items = json.casts || [];
+    const items = Array.isArray(json?.casts) ? json.casts : [];
 
-    for (const cast of items) {
-      const createdAt = cast.timestamp || cast.created_at;
-      if (!createdAt) continue;
-
-      const ms = Date.parse(createdAt);
-      if (!isFinite(ms)) continue;
-
-      if (ms >= startMs && ms < endMs) {
-        casts.push(cast);
-      }
-
-      if (ms < startMs) return casts;
+    for (const c of items) {
+      const ms = castCreatedMs(c);
+      if (ms == null) continue;
+      if (ms >= startMs && ms < endMs) casts.push(c);
     }
 
-    const last = items[items.length - 1];
-    if (last) {
-      const lastMs = Date.parse(last.timestamp || last.created_at);
-      if (lastMs < startMs) break;
-    }
+    // stop early if last item is older than start
+    const last = items.length ? items[items.length - 1] : null;
+    const lastMs = last ? castCreatedMs(last) : null;
+    if (lastMs != null && lastMs < startMs) break;
 
-    cursor = json.next?.cursor || null;
+    cursor = typeof json?.next === 'string' ? json.next : (json?.next?.cursor || null);
     if (!cursor) break;
   }
 
   return casts;
 }
 
-function extractCounts(cast) {
-  const reactions = cast.reactions || {};
-  const replies = cast.replies || {};
+async function getBaseAppActivity(fid, startIso, endIso) {
+  const key = `${fid}|${startIso}|${endIso}`;
+  const cached = socialCacheGet(key);
+  if (cached) return cached;
 
-  return {
-    likes: reactions.likes_count || reactions.likes || 0,
-    recasts: reactions.recasts_count || reactions.recasts || reactions.recastsCount || 0,
-    replies: replies.count || 0,
-  };
+  const startMs = parseMs(startIso);
+  const endMs = parseMs(endIso);
+  if (startMs == null || endMs == null || endMs <= startMs) throw new Error('Invalid window');
+
+  const casts = await fetchUserCasts(fid, startMs, endMs);
+
+  let likes = 0, recasts = 0, replies = 0;
+  for (const c of casts) {
+    const counts = extractCounts(c);
+    likes += counts.likes;
+    recasts += counts.recasts;
+    replies += counts.replies;
+  }
+
+  const payload = { casts: casts.length, likes, recasts, replies };
+
+  // TTL: 30 minutes default (15–60 min recommended)
+  const ttlMs = Number(process.env.SOCIAL_CACHE_TTL_MS || 30 * 60 * 1000);
+  socialCacheSet(key, payload, ttlMs);
+  return payload;
 }
 
-async function getActivityMetrics(fid, startIso, endIso) {
-  const cacheKey = `${fid}_${startIso}_${endIso}`;
-  
-  const cached = activityCache.get(cacheKey);
-  if (cached && Date.now() - cached.timestamp < CONFIG.ACTIVITY_CACHE_TTL) {
-    return cached.data;
+/**
+ * ========================================================
+ * Deterministic Router (Fix Issue #F)
+ * ========================================================
+ */
+function detectIntent(message) {
+  const raw = String(message || '').trim();
+  const lower = raw.toLowerCase();
+
+  if (!raw) return { type: 'help' };
+
+  if (/\bhelp\b|\bcommands?\b|\bhow do i\b|\bwhat can you do\b/i.test(lower)) return { type: 'help' };
+
+  if (/\bbreakdown\b/i.test(lower)) return { type: 'breakdown' };
+
+  if (/\ball\s*time\b|\balltime\b/i.test(lower)) return { type: 'alltime' };
+
+  if (/\bweekly\b|\btop\b/i.test(lower)) return { type: 'weekly' };
+
+  if (/\breward\b|\boverview\b|\bdistributed\b/i.test(lower)) return { type: 'overview' };
+
+  if (/\bmy stats\b|\bmy data\b|\bmy profile\b/i.test(lower)) return { type: 'user_stats_needs_lookup' };
+
+  // explicit "stats for X" / "show data for X"
+  const m = lower.match(/\b(stats|data)\s+(for|of)\s+(.+)$/i);
+  if (m && m[3]) {
+    const extracted = extractFirstIdentifier(m[3]);
+    if (extracted.kind !== 'none') return { type: 'user_stats', identifier: extracted.value };
+
+    // Allow bare base names ONLY in explicit "stats/data for" commands (e.g., "stats for femiii")
+    const token = normalizeIdentifier(String(m[3]).split(/\s+/)[0]);
+    if (token) return { type: 'user_stats', identifier: token };
   }
 
-  const apiKey = process.env.NEYNAR_API_KEY;
-  if (!apiKey) return null;
+  // general user identifier present
+  const { kind, value } = extractFirstIdentifier(raw);
+  if (kind === 'address') return { type: 'user_stats', identifier: value };
+  if (kind === 'username') return { type: 'user_stats', identifier: value };
 
-  try {
-    const startMs = Date.parse(startIso);
-    const endMs = Date.parse(endIso);
-
-    const casts = await fetchUserCasts(fid, apiKey, startMs, endMs);
-
-    let totalLikes = 0;
-    let totalRecasts = 0;
-    let totalReplies = 0;
-
-    for (const cast of casts) {
-      const counts = extractCounts(cast);
-      totalLikes += counts.likes;
-      totalRecasts += counts.recasts;
-      totalReplies += counts.replies;
-    }
-
-    const result = {
-      casts: casts.length,
-      likes: totalLikes,
-      recasts: totalRecasts,
-      replies: totalReplies,
-    };
-
-    activityCache.set(cacheKey, {
-      timestamp: Date.now(),
-      data: result,
-    });
-
-    return result;
-  } catch {
-    return null;
-  }
+  return { type: 'general' };
 }
 
-// ===== USER RESOLUTION (EXACT SPEC) =====
-
-function normalizeUsername(input) {
-  if (!input) return null;
-  
-  let cleaned = input.trim().toLowerCase();
-  
-  if (cleaned.startsWith('@')) {
-    cleaned = cleaned.substring(1);
-  }
-  
-  return cleaned;
+/**
+ * ========================================================
+ * Reply Formatters (Fix Issue #2 + templates E1..E6)
+ * ========================================================
+ */
+function buildClarifyUsername(mentionUsername) {
+  return [
+    `Hey @${mentionUsername}! Please share the exact BaseApp username you want me to check (example: femiii.base.eth).`,
+  ].join('\n');
 }
 
-function getBaseName(username) {
-  if (!username) return null;
-  const parts = username.split('.');
-  return parts[0];
+function formatWeeklyLeaderboardTopN(N = 10) {
+  const rows = (dataCache.weeklyLeaderboard?.rows || []).slice(0, N);
+  const weekStart = dataCache.weeklyLeaderboard?.latest_week_start_utc || '';
+  const meta = getWeekMetaByStart(weekStart);
+  const weekNumber = meta?.week_number ?? '?';
+  const weekLabel = meta?.week_label ?? weekStart;
+
+  let out = `🏆 WEEK ${weekNumber} LEADERBOARD — Top ${rows.length}\n`;
+  for (const r of rows) {
+    const addr = normalizeIdentifier(r.address);
+    const rec = dataCache.byVerifiedAddr.get(addr);
+    const uname = rec?.username ? rec.username : r.user_display;
+    out += `#${r.rank} ${uname} — $${formatMoney(r.this_week_usdc)}\n`;
+  }
+  out += `\nReply “stats for <username>” to see your profile.`;
+  return out;
 }
 
-function findUserInLocal(identifier) {
-  const normalized = normalizeUsername(identifier);
-  if (!normalized) return null;
+function formatAllTimeLeaderboardTopN(N = 10) {
+  const rows = (dataCache.allTimeLeaderboard?.rows || []).slice(0, N);
 
-  const baseName = getBaseName(normalized);
-
-  // Priority 1: Exact match
-  for (const [address, userData] of Object.entries(dataCache.farcasterMap)) {
-    if (userData.status !== 'ok') continue;
-    
-    const fcUsername = normalizeUsername(userData.username);
-    if (fcUsername === normalized) {
-      return { address, userData, source: 'local_exact' };
-    }
+  let out = `🏆 ALL-TIME LEADERBOARD — Top ${rows.length}\n`;
+  for (const r of rows) {
+    const addr = normalizeIdentifier(r.address);
+    const rec = dataCache.byVerifiedAddr.get(addr);
+    const uname = rec?.username ? rec.username : r.user_display;
+    out += `#${r.all_time_rank} ${uname} — $${formatMoney(r.total_usdc)}\n`;
   }
-
-  // Priority 2: baseName match
-  for (const [address, userData] of Object.entries(dataCache.farcasterMap)) {
-    if (userData.status !== 'ok') continue;
-    
-    const fcUsername = normalizeUsername(userData.username);
-    const fcBaseName = getBaseName(fcUsername);
-    
-    if (fcBaseName === baseName) {
-      return { address, userData, source: 'local_basename' };
-    }
-  }
-
-  // Priority 3: Wallet
-  if (normalized.startsWith('0x') && normalized.length === 42) {
-    if (dataCache.farcasterMap[normalized]) {
-      return {
-        address: normalized,
-        userData: dataCache.farcasterMap[normalized],
-        source: 'local_wallet',
-      };
-    }
-  }
-
-  return null;
-}
-
-async function findUserViaNeynar(identifier) {
-  const normalized = normalizeUsername(identifier);
-  if (!normalized) return null;
-
-  const baseName = getBaseName(normalized);
-
-  const users = await searchNeynarUser(normalized);
-  if (!users || users.length === 0) return null;
-
-  let bestMatch = null;
-
-  // Exact username match
-  for (const user of users) {
-    const neynarUsername = normalizeUsername(user.username);
-    if (neynarUsername === normalized) {
-      bestMatch = user;
-      break;
-    }
-  }
-
-  // baseName match
-  if (!bestMatch) {
-    for (const user of users) {
-      const neynarUsername = normalizeUsername(user.username);
-      const neynarBaseName = getBaseName(neynarUsername);
-      if (neynarBaseName === baseName) {
-        bestMatch = user;
-        break;
-      }
-    }
-  }
-
-  if (!bestMatch) return null;
-
-  // Find best wallet with rewards
-  const ethAddresses = bestMatch.verified_addresses?.eth_addresses || [];
-  
-  let bestWallet = null;
-  let maxEarnings = 0;
-
-  for (const addr of ethAddresses) {
-    const normalizedAddr = addr.toLowerCase();
-    
-    const allTimeEntry = dataCache.allTimeLeaderboard.rows.find(
-      row => row.address.toLowerCase() === normalizedAddr
-    );
-
-    if (allTimeEntry) {
-      const earnings = parseFloat(allTimeEntry.total_usdc) || 0;
-      if (earnings > maxEarnings) {
-        maxEarnings = earnings;
-        bestWallet = normalizedAddr;
-      }
-    }
-  }
-
-  return {
-    address: bestWallet,
-    userData: {
-      fid: bestMatch.fid,
-      username: bestMatch.username,
-      display_name: bestMatch.display_name,
-      pfp_url: bestMatch.pfp_url,
-      follower_count: bestMatch.follower_count || 0,
-      following_count: bestMatch.following_count || 0,
-      status: 'ok',
-    },
-    source: 'neynar',
-    hasRewards: !!bestWallet,
-  };
-}
-
-async function resolveUser(identifier) {
-  const local = findUserInLocal(identifier);
-  if (local) {
-    console.log(`✅ Local: ${local.userData.username}`);
-    return local;
-  }
-
-  console.log(`🔍 Neynar: ${identifier}`);
-  const neynar = await findUserViaNeynar(identifier);
-  
-  if (neynar) {
-    console.log(`✅ Neynar: ${neynar.userData.username}`);
-    return neynar;
-  }
-
-  return null;
-}
-
-// ===== ROUTER =====
-
-function routeQuery(message) {
-  const lower = message.toLowerCase().trim();
-
-  if (lower.includes('weekly') || (lower.includes('week') && lower.includes('top'))) {
-    return { intent: 'weekly', count: extractNumber(lower) || 10 };
-  }
-
-  if (lower.includes('alltime') || lower.includes('all time') || lower.includes('all-time')) {
-    return { intent: 'alltime', count: extractNumber(lower) || 10 };
-  }
-
-  if (lower.includes('reward') || lower.includes('overview') || lower.includes('distributed')) {
-    return { intent: 'overview' };
-  }
-
-  if (lower.includes('breakdown')) {
-    return { intent: 'breakdown' };
-  }
-
-  if (lower.includes('help') || lower.includes('command')) {
-    return { intent: 'help' };
-  }
-
-  const walletMatch = message.match(/(0x[a-fA-F0-9]{40})/);
-  if (walletMatch) {
-    return { intent: 'user_stats', identifier: walletMatch[1] };
-  }
-
-  const usernameMatch = message.match(/@?([\w-]+(?:\.base\.eth|\.eth)?)/i);
-  if (usernameMatch) {
-    return { intent: 'user_stats', identifier: usernameMatch[1] };
-  }
-
-  if (lower.includes('my stats') || lower === 'my' || lower === 'me') {
-    return { intent: 'user_stats_needs_lookup' };
-  }
-
-  return { intent: 'general_chat' };
-}
-
-function extractNumber(text) {
-  const match = text.match(/\d+/);
-  return match ? parseInt(match[0]) : null;
-}
-
-// ===== FORMATTING =====
-
-function formatWeekLabel(weekStartIso) {
-  const date = new Date(weekStartIso);
-  const year = date.getUTCFullYear();
-  const month = String(date.getUTCMonth() + 1).padStart(2, '0');
-  const day = String(date.getUTCDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
-}
-
-function getWeekNumber() {
-  return dataCache.allTimeLeaderboard?.week_keys?.length || 0;
-}
-
-async function formatUserStats(user, twitterUsername) {
-  const { address, userData, hasRewards } = user;
-
-  const latestWeekStart = dataCache.weeklyLeaderboard.latest_week_start_utc;
-  const previousWeekStart = dataCache.weeklyLeaderboard.previous_week_start_utc;
-  
-  const weekNumber = getWeekNumber();
-  const weekLabel = formatWeekLabel(latestWeekStart);
-
-  const thisWeekActivity = userData.fid ? await getActivityMetrics(
-    userData.fid,
-    latestWeekStart,
-    new Date().toISOString()
-  ) : null;
-
-  const lastWeekActivity = userData.fid && previousWeekStart ? await getActivityMetrics(
-    userData.fid,
-    previousWeekStart,
-    latestWeekStart
-  ) : null;
-
-  const formatActivity = (activity, label, startDate, endDate) => {
-    if (!activity) {
-      return `📱 BASEAPP ACTIVITY (${label})\n(Temporarily unavailable)`;
-    }
-
-    const start = formatWeekLabel(startDate);
-    const end = endDate === 'now' ? 'now' : formatWeekLabel(endDate);
-
-    return `📱 BASEAPP ACTIVITY (${label}: ${start} → ${end})\n` +
-           `📝 Posts: ${activity.casts}\n` +
-           `❤️ Likes received: ${activity.likes}\n` +
-           `🔄 Recasts: ${activity.recasts}\n` +
-           `✒️ Replies: ${activity.replies}`;
-  };
-
-  if (!address || hasRewards === false) {
-    let response = `📊 baseapp creator statistics of ${userData.username}\n\n`;
-    response += `You didn't yet earn creator reward from @baseapp — keep creating, you can earn next week 💙🤝\n\n`;
-    
-    if (thisWeekActivity) {
-      response += formatActivity(thisWeekActivity, 'This Week', latestWeekStart, 'now') + '\n\n';
-    }
-    
-    if (lastWeekActivity) {
-      response += formatActivity(lastWeekActivity, 'Last reward window', previousWeekStart, latestWeekStart) + '\n\n';
-    }
-
-    response += `👥 COMMUNITY\n`;
-    response += `Followers: ${userData.follower_count || 0}\n`;
-    response += `Following: ${userData.following_count || 0}\n\n`;
-    response += CONFIG.MINIAPP_LINK;
-
-    return response;
-  }
-
-  const allTimeEntry = dataCache.allTimeLeaderboard.rows.find(
-    row => row.address.toLowerCase() === address.toLowerCase()
-  );
-
-  const weeklyEntry = dataCache.weeklyLeaderboard.rows.find(
-    row => row.address.toLowerCase() === address.toLowerCase()
-  );
-
-  let response = `📊 baseapp creator statistics of ${userData.username}\n\n`;
-
-  if (allTimeEntry) {
-    response += `💰 ALL-TIME REWARDS\n`;
-    response += `Total Earned: $${allTimeEntry.total_usdc}\n`;
-    response += `Rank: #${allTimeEntry.all_time_rank} 🏆\n`;
-    response += `Weeks Earned: ${allTimeEntry.total_weeks_earned}\n\n`;
-  }
-
-  if (weeklyEntry) {
-    response += `📈 LATEST WEEK (Week ${weekNumber} — ${weekLabel})\n`;
-    response += `Earned: $${weeklyEntry.this_week_usdc}\n`;
-    response += `Rank: #${weeklyEntry.rank}\n`;
-    response += `Previous Week: $${weeklyEntry.previous_week_usdc}\n`;
-
-    if (weeklyEntry.pct_change) {
-      const change = parseFloat(weeklyEntry.pct_change);
-      const arrow = change > 0 ? '📈' : change < 0 ? '📉' : '→';
-      response += `Change: ${change >= 0 ? '+' : ''}${weeklyEntry.pct_change}% ${arrow}\n`;
-    }
-    response += '\n';
-  }
-
-  if (thisWeekActivity) {
-    response += formatActivity(thisWeekActivity, 'This Week', latestWeekStart, 'now') + '\n\n';
-  }
-
-  if (lastWeekActivity) {
-    response += formatActivity(lastWeekActivity, 'Last reward window', previousWeekStart, latestWeekStart) + '\n\n';
-  }
-
-  response += `👥 COMMUNITY\n`;
-  response += `Followers: ${userData.follower_count || 0}\n`;
-  response += `Following: ${userData.following_count || 0}\n\n`;
-
-  response += `🎉 Keep creating on ${CONFIG.PLATFORM_NAME}! 🚀\n\n`;
-  response += CONFIG.MINIAPP_LINK;
-
-  return response;
-}
-
-function formatLeaderboard(type, count) {
-  const data = type === 'weekly' 
-    ? dataCache.weeklyLeaderboard
-    : dataCache.allTimeLeaderboard;
-
-  const weekNumber = getWeekNumber();
-  const topN = data.rows.slice(0, count);
-
-  let response = type === 'weekly'
-    ? `🏆 WEEK ${weekNumber} LEADERBOARD — Top ${count}\n`
-    : `🏆 ALL-TIME LEADERBOARD — Top ${count}\n`;
-
-  topN.forEach((user, idx) => {
-    const fc = dataCache.farcasterMap[user.address.toLowerCase()];
-    const username = fc?.username || `user${idx + 1}`;
-
-    if (type === 'weekly') {
-      response += `#${idx + 1} ${username} — $${user.this_week_usdc}\n`;
-    } else {
-      response += `#${idx + 1} ${username} — $${user.total_usdc}\n`;
-    }
-  });
-
-  response += `\nReply "stats for <username>" to see your profile.\n\n`;
-  response += CONFIG.MINIAPP_LINK;
-
-  return response;
+  out += `\nReply “stats for <username>” to see your profile.`;
+  return out;
 }
 
 function formatOverview() {
-  const ov = dataCache.overview;
-  const weekNumber = getWeekNumber();
-  const weekLabel = formatWeekLabel(dataCache.weeklyLeaderboard.latest_week_start_utc);
+  const o = dataCache.overview;
+  const weekStart = dataCache.weeklyLeaderboard?.latest_week_start_utc || o?.latest_week?.week_start_utc || '';
+  const meta = getWeekMetaByStart(weekStart);
+  const weekNumber = meta?.week_number ?? '?';
+  const weekLabel = meta?.week_label ?? weekStart;
 
-  let response = `📊 BASEAPP REWARDS OVERVIEW (Latest Week: Week ${weekNumber} — ${weekLabel})\n`;
-  response += `Total USDC distributed (latest week): $${ov.latest_week.total_usdc}\n`;
-  response += `Unique creators rewarded (latest week): ${ov.latest_week.unique_users}\n\n`;
-  response += `Total USDC distributed (all-time): $${ov.all_time.total_usdc}\n`;
-  response += `Unique creators (all-time): ${ov.all_time.unique_users}\n\n`;
-  response += CONFIG.MINIAPP_LINK;
-
-  return response;
+  let out = `📊 BASEAPP REWARDS OVERVIEW (Latest Week: Week ${weekNumber} — ${weekLabel})\n`;
+  out += `Total USDC distributed (latest week): $${formatMoney(o.latest_week.total_usdc)}\n`;
+  out += `Unique creators rewarded (latest week): ${o.latest_week.unique_users}\n`;
+  out += `All-time distributed: $${formatMoney(o.all_time.total_usdc)}\n`;
+  out += `All-time unique creators: ${o.all_time.unique_users.toLocaleString?.() || o.all_time.unique_users}\n`;
+  out += `Reward distributor: ${o.reward_distributor}\n`;
+  return out;
 }
 
 function formatBreakdown() {
-  const ov = dataCache.overview;
-  const weekNumber = getWeekNumber();
-  const weekLabel = formatWeekLabel(dataCache.weeklyLeaderboard.latest_week_start_utc);
+  const o = dataCache.overview;
+  const weekStart = dataCache.weeklyLeaderboard?.latest_week_start_utc || o?.latest_week?.week_start_utc || '';
+  const meta = getWeekMetaByStart(weekStart);
+  const weekNumber = meta?.week_number ?? '?';
+  const weekLabel = meta?.week_label ?? weekStart;
 
-  let response = `📊 LATEST WEEK REWARD BREAKDOWN (Week ${weekNumber} — ${weekLabel})\n`;
-  
-  ov.latest_week.breakdown.forEach(bucket => {
-    response += `$${bucket.reward_usdc} — ${bucket.users} creators\n`;
+  let out = `📊 LATEST WEEK REWARD BREAKDOWN (Week ${weekNumber} — ${weekLabel})\n`;
+  for (const tier of o.latest_week.breakdown || []) {
+    out += `$${formatMoney(tier.reward_usdc)} — ${tier.users} creators\n`;
+  }
+  return out;
+}
+
+async function formatUserStats(identifier) {
+  // local first
+  let resolved = resolveUserLocal(identifier);
+
+  if (!resolved.ok) {
+    // fallback to Neynar if not found (never guess)
+    if (resolved.reason === 'ambiguous_base') {
+      return { kind: 'clarify', text: `I found multiple BaseApp profiles that match “${resolved.base}”. Please reply with the exact BaseApp username (example: femiii.base.eth).` };
+    }
+
+    const neyn = await resolveUserNeynar(identifier);
+    if (!neyn.ok) {
+      return { kind: 'clarify', text: `I couldn’t find that BaseApp username. Please reply with the exact BaseApp username (example: femiii.base.eth).` };
+    }
+
+    // We have a Neynar user hydrated object; now choose reward address using their verified addresses
+    const user = neyn.user;
+    const fid = user.fid;
+    const username = normalizeIdentifier(user.username || '');
+    const verified = (user.verified_addresses?.eth_addresses || []).map((a) => normalizeIdentifier(a)).filter((a) => isEthAddress(a));
+
+    const pseudoRec = {
+      rewardAddressKey: verified[0] || null,
+      fid,
+      username,
+      display_name: user.display_name || null,
+      follower_count: user.follower_count ?? null,
+      following_count: user.following_count ?? null,
+      verified_eth_addresses: verified,
+      raw: user,
+    };
+
+    resolved = { ok: true, rec: pseudoRec, rewardAddress: pickRewardAddress(pseudoRec) };
+  }
+
+  const rec = resolved.rec;
+  const rewardAddress = resolved.rewardAddress;
+
+  const weekly = getLeaderboardWeeklyEntry(rewardAddress);
+  const allTime = getLeaderboardAllTimeEntry(rewardAddress);
+
+  const weekStartYmd = dataCache.weeklyLeaderboard?.latest_week_start_utc || null;
+  const meta = weekStartYmd ? getWeekMetaByStart(weekStartYmd) : null;
+  const weekNumber = meta?.week_number ?? '?';
+  const weekLabel = meta?.week_label ?? (weekStartYmd || '');
+
+  const startIso = weekStartYmd ? isoAtUtcMidnight(weekStartYmd) : new Date().toISOString();
+  const nowIso = new Date().toISOString();
+  const lastWindowStartIso = addDaysIso(startIso, -7);
+
+  // BaseApp activity windows (mirrors miniapp)
+  let activityThis = null;
+  let activityLast = null;
+
+  try {
+    if (rec.fid) {
+      activityThis = await getBaseAppActivity(rec.fid, startIso, nowIso);
+      activityLast = await getBaseAppActivity(rec.fid, lastWindowStartIso, startIso);
+    }
+  } catch {
+    // leave null; handled below
+  }
+
+  const uname = rec.username || identifier;
+
+  // Build response per E1/E2 templates
+  const followerCount = rec.follower_count ?? rec.raw?.follower_count ?? 0;
+  const followingCount = rec.following_count ?? rec.raw?.following_count ?? 0;
+
+  if (allTime || weekly) {
+    const allTimeUsd = allTime?.total_usdc ?? 0;
+    const allTimeRank = allTime?.all_time_rank ?? '—';
+    const weeks = allTime?.total_weeks_earned ?? 0;
+
+    const thisWeekUsd = weekly?.this_week_usdc ?? 0;
+    const weeklyRank = weekly?.rank ?? '—';
+    const prevWeekUsd = weekly?.previous_week_usdc ?? 0;
+    const change = arrowPct(weekly?.pct_change);
+
+    const aThis = activityThis
+      ? `📝 Posts: ${activityThis.casts}\n❤️ Likes received: ${activityThis.likes}\n🔄 Recasts: ${activityThis.recasts}\n✒️ Replies: ${activityThis.replies}`
+      : '(BaseApp activity temporarily unavailable)';
+
+    const aLast = activityLast
+      ? `📝 Posts: ${activityLast.casts}\n❤️ Likes received: ${activityLast.likes}\n🔄 Recasts: ${activityLast.recasts}\n✒️ Replies: ${activityLast.replies}`
+      : '(BaseApp activity temporarily unavailable)';
+
+    const out = [
+      `📊 baseapp creator statistics of  ${uname}`,
+      '',
+      '💰 ALL-TIME REWARDS',
+      `Total Earned: $${formatMoney(allTimeUsd)}`,
+      `Rank: #${allTimeRank} 🏆`,
+      `Weeks Earned: ${weeks}`,
+      '',
+      `📈 LATEST WEEK (Week ${weekNumber} — ${weekLabel})`,
+      `Earned: $${formatMoney(thisWeekUsd)}`,
+      `Rank: #${weeklyRank}`,
+      `Previous Week: $${formatMoney(prevWeekUsd)}`,
+      `Change: ${change}`,
+      '',
+      `📱 BASEAPP ACTIVITY (This Week: ${weekStartYmd} → now)`,
+      aThis,
+      '',
+      `📱 BASEAPP ACTIVITY (Last reward window: ${addDaysIso(startIso, -7).slice(0,10)} → ${weekStartYmd})`,
+      aLast,
+      '',
+      '👥 COMMUNITY',
+      `Followers: ${Number(followerCount).toLocaleString?.() || followerCount}`,
+      `Following: ${Number(followingCount).toLocaleString?.() || followingCount}`,
+      '',
+      '🎉 Keep creating on BaseApp! 🚀',
+    ].join('\n');
+
+    return { kind: 'normal', text: out };
+  }
+
+  // No rewards template E2
+  const aThis = activityThis
+    ? `📝 Posts: ${activityThis.casts}\n❤️ Likes received: ${activityThis.likes}\n🔄 Recasts: ${activityThis.recasts}\n✒️ Replies: ${activityThis.replies}`
+    : '(BaseApp activity temporarily unavailable)';
+
+  const aLast = activityLast
+    ? `📝 Posts: ${activityLast.casts}\n❤️ Likes received: ${activityLast.likes}\n🔄 Recasts: ${activityLast.recasts}\n✒️ Replies: ${activityLast.replies}`
+    : '(BaseApp activity temporarily unavailable)';
+
+  const out = [
+    `📊 baseapp creator statistics of  ${uname}`,
+    '',
+    'You didn’t yet earn creator reward from @baseapp — keep creating, you can earn next week 💙🤝',
+    '',
+    `📱 BASEAPP ACTIVITY (This Week: ${weekStartYmd} → now)`,
+    aThis,
+    '',
+    `📱 BASEAPP ACTIVITY (Last reward window: ${addDaysIso(startIso, -7).slice(0,10)} → ${weekStartYmd})`,
+    aLast,
+    '',
+    '👥 COMMUNITY',
+    `Followers: ${Number(followerCount).toLocaleString?.() || followerCount}`,
+    `Following: ${Number(followingCount).toLocaleString?.() || followingCount}`,
+  ].join('\n');
+
+  return { kind: 'normal', text: out };
+}
+
+/**
+ * ========================================================
+ * General chat via Claude (no identity matching)
+ * ========================================================
+ */
+async function generateGeneralChat(message) {
+  if (!process.env.ANTHROPIC_API_KEY) {
+    return `I can help with BaseApp rewards and social info. Reply “help” to see commands.`;
+  }
+
+  const aiResponse = await anthropic.messages.create({
+    model: 'claude-sonnet-4-20250514',
+    max_tokens: 280,
+    system: `You are the BaseApp rewards bot for X. Be helpful and concise.
+Rules:
+- NEVER output the word "Farcaster". Use "BaseApp" instead.
+- Never invent user stats. If asked for stats, instruct them to provide a BaseApp username.
+- Keep responses under 280 characters.`,
+    messages: [{ role: 'user', content: message }],
   });
 
-  response += `\n${CONFIG.MINIAPP_LINK}`;
-
-  return response;
+  const text = aiResponse.content?.[0]?.text || '';
+  // hard guard: replace forbidden word if model ever emits it
+  return text.replace(/farcaster/gi, 'BaseApp');
 }
 
-function formatHelp(mentionUsername) {
-  return `Hey @${mentionUsername}! I'm here to help with ${CONFIG.PLATFORM_NAME} rewards and social info! 🎯\n\n` +
-         `Try these:\n` +
-         `• show data for [baseapp username]\n` +
-         `• weekly — weekly leaderboard\n` +
-         `• alltime — alltime leaderboard\n` +
-         `• reward — overall distribution info\n` +
-         `• breakdown — latest week reward breakdown\n\n` +
-         `What would you like to know? 🚀`;
-}
-
-function formatClarification(mentionUsername) {
-  return `Hey @${mentionUsername}! I need your exact ${CONFIG.PLATFORM_NAME} username to show your stats.\n\n` +
-         `Reply with your username (e.g., "femiii.base.eth" or "femiii")`;
-}
-
-// ===== TWEET HANDLING =====
-
+/**
+ * ========================================================
+ * Tweet helpers
+ * ========================================================
+ */
 function splitIntoTweets(text) {
-  if (text.length <= 280) return [text];
+  const maxLength = 280;
+  if (text.length <= maxLength) return [text];
 
-  const parts = text.split('\n\n');
+  const lines = text.split('\n');
   const tweets = [];
   let current = '';
 
-  for (const part of parts) {
-    if ((current + '\n\n' + part).length > 270) {
-      if (current) tweets.push(current.trim());
-      current = part;
+  for (const line of lines) {
+    const add = (current ? '\n' : '') + line;
+    if ((current + add).length > maxLength) {
+      if (current) tweets.push(current);
+      current = line;
     } else {
-      current += (current ? '\n\n' : '') + part;
+      current += add;
     }
   }
+  if (current) tweets.push(current);
 
-  if (current) tweets.push(current.trim());
-
-  return tweets;
+  // still too long lines fallback
+  return tweets.map((t) => (t.length <= maxLength ? t : t.slice(0, maxLength - 3) + '...'));
 }
 
 async function replyToTweet(tweetId, message) {
-  try {
-    const tweets = splitIntoTweets(message);
-    let lastId = tweetId;
+  const tweets = splitIntoTweets(message);
+  let lastTweetId = tweetId;
 
-    for (let i = 0; i < tweets.length; i++) {
-      const text = tweets.length > 1
-        ? `(${i + 1}/${tweets.length})\n\n${tweets[i]}`
-        : tweets[i];
-
-      const response = await rwClient.v2.reply(text, lastId);
-      lastId = response.data.id;
-
-      console.log(`   ✅ Replied (${i + 1}/${tweets.length})`);
-
-      if (i < tweets.length - 1) {
-        await new Promise(r => setTimeout(r, 2000));
-      }
-    }
-
-    return true;
-  } catch (error) {
-    console.error(`   ❌ Reply failed:`, error.message);
-    return false;
+  for (let i = 0; i < tweets.length; i++) {
+    const tweetText = tweets.length > 1 ? `(${i + 1}/${tweets.length}) ${tweets[i]}` : tweets[i];
+    const res = await rwClient.v2.reply(tweetText, lastTweetId);
+    lastTweetId = res.data.id;
+    if (i < tweets.length - 1) await new Promise((r) => setTimeout(r, 1500));
   }
 }
 
-// ===== MENTIONS =====
+async function postStandalone(text) {
+  const tweets = splitIntoTweets(text);
+  let lastId = null;
 
+  for (let i = 0; i < tweets.length; i++) {
+    const tweetText = tweets.length > 1 ? `(${i + 1}/${tweets.length}) ${tweets[i]}` : tweets[i];
+    const res = await rwClient.v2.tweet(tweetText, lastId ? { reply: { in_reply_to_tweet_id: lastId } } : undefined);
+    lastId = res.data.id;
+    if (i < tweets.length - 1) await new Promise((r) => setTimeout(r, 1500));
+  }
+}
+
+/**
+ * ========================================================
+ * Main mention processing (Fix Issue #1)
+ * ========================================================
+ */
 async function bootstrapMentions(botUserId) {
-  console.log('🔄 Bootstrap mentions...');
+  // Fetch latest mentions ONCE, set lastMentionId to newest_id, and DO NOT reply.
+  console.log('🧰 Bootstrapping mentions (no replies)...');
+  const params = {
+    max_results: 10,
+    'tweet.fields': ['created_at', 'conversation_id'],
+    'user.fields': ['username'],
+    expansions: ['author_id'],
+  };
 
-  try {
-    const mentions = await rwClient.v2.userMentionTimeline(botUserId, {
-      max_results: 10,
-      'tweet.fields': ['created_at'],
-    });
+  const mentions = await rwClient.v2.userMentionTimeline(botUserId, params);
+  const newest = mentions?.data?.meta?.newest_id || null;
 
-    if (mentions.data?.meta?.newest_id) {
-      state.lastMentionId = mentions.data.meta.newest_id;
-      await saveState();
-      console.log(`✅ Bootstrap done: ${state.lastMentionId}`);
-    }
-  } catch (error) {
-    console.error('Bootstrap error:', error.message);
+  if (newest) {
+    state.lastMentionId = newest;
+    await persistState();
+    console.log(`✅ Bootstrap complete. lastMentionId=${state.lastMentionId}`);
+  } else {
+    console.log('✅ Bootstrap complete. No mentions found.');
   }
 }
 
-async function processMentions(botUserId) {
-  try {
-    const params = {
-      max_results: 10,
-      'tweet.fields': ['created_at'],
-      'user.fields': ['username'],
-      expansions: ['author_id'],
-    };
+async function processMentions(botUserId, botUsername) {
+  const params = {
+    max_results: 10,
+    'tweet.fields': ['created_at', 'conversation_id'],
+    'user.fields': ['username'],
+    expansions: ['author_id'],
+  };
 
-    if (state.lastMentionId) {
-      params.since_id = state.lastMentionId;
+  if (state.lastMentionId) params.since_id = state.lastMentionId;
+
+  const mentions = await rwClient.v2.userMentionTimeline(botUserId, params);
+
+  const tweets = mentions?.data?.data || [];
+  const metaNewest = mentions?.data?.meta?.newest_id || null;
+
+  if (!tweets.length) {
+    if (metaNewest && metaNewest !== state.lastMentionId) {
+      state.lastMentionId = metaNewest;
+      await persistState();
     }
-
-    const mentions = await rwClient.v2.userMentionTimeline(botUserId, params);
-
-    if (!mentions.data?.data?.length) return;
-
-    if (mentions.data.meta.newest_id) {
-      state.lastMentionId = mentions.data.meta.newest_id;
-      await saveState();
-    }
-
-    for (const tweet of mentions.data.data) {
-      if (state.processedMentionIds.includes(tweet.id)) {
-        continue;
-      }
-
-      if (tweet.author_id === botUserId) {
-        continue;
-      }
-
-      const author = mentions.includes?.users?.find(u => u.id === tweet.author_id);
-      const username = author?.username || 'user';
-
-      console.log(`\n📨 @${username}: ${tweet.text.substring(0, 50)}...`);
-
-      const message = tweet.text.replace(/@\w+/g, '').trim();
-
-      const route = routeQuery(message);
-
-      let response;
-
-      switch (route.intent) {
-        case 'weekly':
-          response = formatLeaderboard('weekly', route.count);
-          break;
-
-        case 'alltime':
-          response = formatLeaderboard('alltime', route.count);
-          break;
-
-        case 'overview':
-          response = formatOverview();
-          break;
-
-        case 'breakdown':
-          response = formatBreakdown();
-          break;
-
-        case 'help':
-          response = formatHelp(username);
-          break;
-
-        case 'user_stats':
-          const user = await resolveUser(route.identifier);
-          if (!user) {
-            response = formatClarification(username);
-          } else {
-            response = await formatUserStats(user, username);
-          }
-          break;
-
-        case 'user_stats_needs_lookup':
-          response = formatClarification(username);
-          break;
-
-        case 'general_chat':
-        default:
-          try {
-            const aiResponse = await anthropic.messages.create({
-              model: 'claude-sonnet-4-20250514',
-              max_tokens: 200,
-              messages: [{ role: 'user', content: message }],
-            });
-            response = aiResponse.content[0].text + '\n\n' + CONFIG.MINIAPP_LINK;
-          } catch {
-            response = formatHelp(username);
-          }
-      }
-
-      await replyToTweet(tweet.id, response);
-
-      state.processedMentionIds.push(tweet.id);
-      
-      if (state.processedMentionIds.length > 1000) {
-        state.processedMentionIds = state.processedMentionIds.slice(-1000);
-      }
-
-      await saveState();
-
-      await new Promise(r => setTimeout(r, 3000));
-    }
-  } catch (error) {
-    console.error('❌ Mention error:', error.message);
-  }
-}
-
-// ===== DAILY POSTS =====
-
-async function postDailyWinner(slotIndex) {
-  const today = new Date().toISOString().split('T')[0];
-  const slotKey = `${today}#${slotIndex}`;
-
-  if (state.dailyPost.postedSlots.includes(slotKey)) {
-    console.log(`✅ Slot ${slotIndex} posted`);
     return;
   }
 
-  const currentWeek = dataCache.weeklyLeaderboard.latest_week_start_utc;
-  if (currentWeek !== state.dailyPost.weekStartUtc) {
-    console.log(`📅 New week! Reset`);
-    state.dailyPost.weekStartUtc = currentWeek;
-    state.dailyPost.cursor = 0;
-    state.dailyPost.date = today;
-    state.dailyPost.postedSlots = [];
-    await saveState();
-  }
+  for (const tweet of tweets) {
+    const id = tweet.id;
+    if (state.processedMentionIds.includes(id)) continue;
+    if (tweet.author_id === botUserId) continue;
 
+    const author = mentions.includes?.users?.find((u) => u.id === tweet.author_id);
+    const mentionUsername = author?.username || 'unknown';
+
+    console.log(`\n📨 Mention from @${mentionUsername}: ${tweet.text}`);
+
+    // Extract message (remove @mentions)
+    const message = tweet.text.replace(/@\w+/g, '').trim();
+
+    let kind = 'normal';
+    let replyText = '';
+
+    try {
+      const intent = detectIntent(message);
+
+      if (intent.type === 'help') {
+        kind = 'help';
+        replyText = HELP_TEXT(mentionUsername);
+      } else if (intent.type === 'user_stats_needs_lookup') {
+        kind = 'clarify';
+        replyText = buildClarifyUsername(mentionUsername);
+      } else if (intent.type === 'user_stats') {
+        const res = await formatUserStats(intent.identifier);
+        kind = res.kind;
+        replyText = res.text;
+      } else if (intent.type === 'weekly') {
+        replyText = formatWeeklyLeaderboardTopN(Number(process.env.LEADERBOARD_TOP_N || 10));
+      } else if (intent.type === 'alltime') {
+        replyText = formatAllTimeLeaderboardTopN(Number(process.env.LEADERBOARD_TOP_N || 10));
+      } else if (intent.type === 'overview') {
+        replyText = formatOverview();
+      } else if (intent.type === 'breakdown') {
+        replyText = formatBreakdown();
+      } else {
+        // general chat via Claude
+        replyText = await generateGeneralChat(message);
+      }
+    } catch (e) {
+      console.error('❌ Error generating reply:', e?.message || e);
+      kind = 'help';
+      replyText = HELP_TEXT(mentionUsername);
+    }
+
+    replyText = appendFooter(replyText, kind);
+
+    // Last guard: never output forbidden word
+    replyText = replyText.replace(/farcaster/gi, 'BaseApp');
+
+    await replyToTweet(id, replyText);
+
+    rememberProcessedMention(id);
+
+    // After processing batch, update lastMentionId to meta.newest_id (persist)
+    if (metaNewest) state.lastMentionId = metaNewest;
+    await persistState();
+
+    // Rate limiting
+    await new Promise((r) => setTimeout(r, 2500));
+  }
+}
+
+/**
+ * ========================================================
+ * DAILY AUTOPOST (10 posts/day) — Issue #G
+ * ========================================================
+ */
+function parseDailyTimesUtc() {
+  const raw = (process.env.DAILY_POST_TIMES || '').trim();
+  if (!raw) return null;
+  const parts = raw.split(',').map((s) => s.trim()).filter(Boolean);
+  const ok = parts.filter((t) => /^\d{2}:\d{2}$/.test(t));
+  return ok.length ? ok : null;
+}
+
+function evenlySpacedTimes(count) {
+  // evenly spaced hours; start at 00:00
+  const out = [];
+  for (let i = 0; i < count; i++) {
+    const minutesTotal = Math.floor((24 * 60 * i) / count);
+    const h = String(Math.floor(minutesTotal / 60)).padStart(2, '0');
+    const m = String(minutesTotal % 60).padStart(2, '0');
+    out.push(`${h}:${m}`);
+  }
+  return out;
+}
+
+async function ensureDailyPostState() {
+  const today = utcDateYmd();
+  const latestWeekStart = dataCache.weeklyLeaderboard?.latest_week_start_utc || state.latestWeekStartUtc;
+
+  if (!state.dailyPost) state.dailyPost = structuredClone(DEFAULT_STATE.dailyPost);
+
+  // day rollover
   if (state.dailyPost.date !== today) {
     state.dailyPost.date = today;
     state.dailyPost.postedSlots = [];
-    await saveState();
   }
 
-  const weeklyRows = dataCache.weeklyLeaderboard.rows;
-  
-  if (state.dailyPost.cursor >= weeklyRows.length) {
+  // week rollover
+  if (latestWeekStart && state.dailyPost.weekStartUtc !== latestWeekStart) {
+    state.dailyPost.weekStartUtc = latestWeekStart;
     state.dailyPost.cursor = 0;
-    await saveState();
+    state.dailyPost.postedSlots = [];
   }
 
-  const winner = weeklyRows[state.dailyPost.cursor];
-  if (!winner) {
-    console.log('No winner');
-    return;
-  }
-
-  const fc = dataCache.farcasterMap[winner.address.toLowerCase()];
-  const username = fc?.username || `user${winner.rank}`;
-
-  const allTimeEntry = dataCache.allTimeLeaderboard.rows.find(
-    row => row.address.toLowerCase() === winner.address.toLowerCase()
-  );
-
-  const weekNumber = getWeekNumber();
-  const latestWeekStart = dataCache.weeklyLeaderboard.latest_week_start_utc;
-
-  const activity = fc?.fid ? await getActivityMetrics(
-    fc.fid,
-    latestWeekStart,
-    new Date().toISOString()
-  ) : null;
-
-  let post = `WEEK ${weekNumber} TOP CREATORS — #${winner.rank}\n\n`;
-  post += `🏆 ${username}\n`;
-  post += `💰 Earned (latest week): $${winner.this_week_usdc}\n`;
-  
-  if (allTimeEntry) {
-    post += `📊 All-time: $${allTimeEntry.total_usdc} (Rank #${allTimeEntry.all_time_rank})\n\n`;
-  } else {
-    post += '\n';
-  }
-
-  if (activity) {
-    post += `📱 ${CONFIG.PLATFORM_NAME} activity (This Week)\n`;
-    post += `• Posts: ${activity.casts} • Likes: ${activity.likes}\n`;
-    post += `• Recasts: ${activity.recasts} • Replies: ${activity.replies}\n\n`;
-  } else {
-    post += `📱 ${CONFIG.PLATFORM_NAME} activity (This Week)\n`;
-    post += `(Temporarily unavailable)\n\n`;
-  }
-
-  if (fc) {
-    post += `👥 Followers: ${fc.follower_count || 0}\n\n`;
-  }
-
-  post += `${CONFIG.MINIAPP_LINK}\n\n`;
-  post += `Reply "stats for <username>" to check yours.`;
-
-  try {
-    await rwClient.v2.tweet(post);
-    
-    console.log(`✅ Daily ${slotIndex}: Rank #${winner.rank}`);
-
-    state.dailyPost.postedSlots.push(slotKey);
-    state.dailyPost.cursor++;
-    await saveState();
-
-  } catch (error) {
-    console.error(`❌ Daily post failed:`, error.message);
-  }
+  await persistState();
 }
 
-function setupDailyPosts() {
-  if (!CONFIG.ENABLE_DAILY_POSTS) {
-    console.log('📅 Daily posts OFF');
+async function buildDailyPostForRow(row) {
+  const addr = normalizeIdentifier(row.address);
+  const rec = dataCache.byVerifiedAddr.get(addr);
+  const username = rec?.username || row.user_display;
+  const fid = rec?.fid || null;
+
+  const allTime = getLeaderboardAllTimeEntry(addr);
+  const allTimeUsd = allTime?.total_usdc ?? 0;
+  const allTimeRank = allTime?.all_time_rank ?? '—';
+
+  const weekStart = dataCache.weeklyLeaderboard?.latest_week_start_utc || state.latestWeekStartUtc || '';
+  const meta = getWeekMetaByStart(weekStart);
+  const weekNumber = meta?.week_number ?? '?';
+
+  const rank = row.rank;
+  const rankRangeHint = rank <= 10 ? 'Top 10' : (rank <= 50 ? 'Top 50' : 'Top creators');
+
+  let activityBlock = '(BaseApp activity temporarily unavailable)';
+  if (fid) {
+    try {
+      const startIso = isoAtUtcMidnight(weekStart);
+      const nowIso = new Date().toISOString();
+      const a = await getBaseAppActivity(fid, startIso, nowIso);
+      activityBlock = [
+        '📱 BaseApp activity (This Week)',
+        `• Posts: ${a.casts} • Likes: ${a.likes}`,
+        `• Recasts: ${a.recasts} • Replies: ${a.replies}`,
+      ].join('\n');
+    } catch {
+      // keep unavailable
+    }
+  }
+
+  const followers = rec?.follower_count ?? rec?.raw?.follower_count ?? '—';
+
+  const out = [
+    `WEEK ${weekNumber} TOP CREATORS — #${rank} (${rankRangeHint})`,
+    '',
+    `🏆 ${username}`,
+    `💰 Earned (latest week): $${formatMoney(row.this_week_usdc)}`,
+    `📊 All-time: $${formatMoney(allTimeUsd)} (Rank #${allTimeRank})`,
+    '',
+    activityBlock,
+    '',
+    `👥 Followers: ${followers === '—' ? '—' : (Number(followers).toLocaleString?.() || followers)}`,
+    '',
+    FOOTER,
+    '',
+    `Reply “stats for <username>” to check yours.`,
+  ].join('\n');
+
+  return out.replace(/farcaster/gi, 'BaseApp');
+}
+
+async function runDailyPostSlot(slotIndex) {
+  await ensureDailyPostState();
+
+  const slotsKey = `${state.dailyPost.date}#${slotIndex}`;
+  if (state.dailyPost.postedSlots.includes(slotsKey)) {
+    console.log(`⏭️  Daily post slot already done: ${slotsKey}`);
     return;
   }
 
-  console.log(`📅 Daily posts ON: ${CONFIG.DAILY_POSTS_PER_DAY}/day`);
+  const rows = dataCache.weeklyLeaderboard?.rows || [];
+  if (!rows.length) {
+    console.log('⚠️ No weekly leaderboard rows loaded; skipping daily post.');
+    return;
+  }
 
-  CONFIG.DAILY_POST_TIMES.forEach((time, index) => {
-    const [hour, minute] = time.split(':');
-    const cronPattern = `${minute} ${hour} * * *`;
+  // Cursor points to next row to post
+  let idx = state.dailyPost.cursor % rows.length;
+  const row = rows[idx];
 
-    cron.schedule(cronPattern, async () => {
-      console.log(`\n⏰ Slot ${index}`);
-      await postDailyWinner(index);
-    });
+  const postText = await buildDailyPostForRow(row);
+  await postStandalone(postText);
 
-    console.log(`   ${index}: ${time} UTC`);
+  state.dailyPost.postedSlots.push(slotsKey);
+  state.dailyPost.cursor = (state.dailyPost.cursor + 1) % rows.length;
+  await persistState();
+
+  console.log(`✅ Daily post slot ${slotIndex} posted. cursor=${state.dailyPost.cursor}`);
+}
+
+function setupDailyAutopost() {
+  const enabled = String(process.env.ENABLE_DAILY_POSTS || '').toLowerCase() === 'true';
+  if (!enabled) {
+    console.log('🟦 Daily autopost disabled (ENABLE_DAILY_POSTS!=true)');
+    return;
+  }
+
+  const perDay = Number(process.env.DAILY_POSTS_PER_DAY || 10);
+  const times = parseDailyTimesUtc() || evenlySpacedTimes(perDay);
+
+  console.log(`🗓️  Daily autopost enabled: ${times.length} posts/day (UTC)`);
+  times.forEach((t, i) => {
+    const [hh, mm] = t.split(':').map((x) => Number(x));
+    const expr = `${mm} ${hh} * * *`;
+
+    cron.schedule(expr, () => {
+      runDailyPostSlot(i).catch((e) => console.error('❌ Daily post failed:', e?.message || e));
+    }, { timezone: 'UTC' });
   });
 }
 
-// ===== MAIN =====
-
+/**
+ * ========================================================
+ * Main
+ * ========================================================
+ */
 async function runBot() {
-  console.log(`\n🤖 ${CONFIG.PLATFORM_NAME} ULTIMATE BOT\n`);
+  console.log('🤖 BaseApp Twitter Bot Starting...\n');
 
   await loadState();
   await loadData();
 
   const me = await rwClient.v2.me();
   const botUserId = me.data.id;
+  const botUsername = me.data.username;
 
-  console.log(`✅ @${me.data.username}`);
-  console.log(`📊 Week ${getWeekNumber()}`);
-  console.log(`👂 Listening...\n`);
+  console.log(`✅ Authenticated as @${botUsername}`);
+  console.log(`🗂️  State file: ${STATE_PATH}`);
+  console.log('─'.repeat(60));
 
-  if (!state.lastMentionId) {
-    await bootstrapMentions(botUserId);
-  }
+  // Bootstrap fix: never reply to old mentions after deploy
+  await bootstrapMentions(botUserId);
 
-  await processMentions(botUserId);
+  // Start autopost scheduler
+  setupDailyAutopost();
 
-  setInterval(async () => {
-    await processMentions(botUserId);
-  }, CONFIG.POLL_INTERVAL);
+  // Poll mentions
+  const pollMs = Number(process.env.POLL_INTERVAL_MS || 60_000);
+  console.log(`👂 Listening for mentions (poll every ${Math.round(pollMs / 1000)}s)...\n`);
 
-  setupDailyPosts();
+  // initial poll after bootstrap (should be empty unless new mentions came in)
+  await processMentions(botUserId, botUsername);
 
-  console.log('✅ Running!');
+  setInterval(() => {
+    processMentions(botUserId, botUsername).catch((e) => console.error('❌ Mention poll failed:', e?.message || e));
+  }, pollMs);
+
+  // reload data periodically
+  const reloadMs = Number(process.env.DATA_RELOAD_MS || 6 * 60 * 60 * 1000);
+  setInterval(() => {
+    loadData().catch((e) => console.error('❌ Data reload failed:', e?.message || e));
+  }, reloadMs);
 }
 
-process.on('SIGINT', async () => {
-  console.log('\n👋 Shutting down...');
-  await saveState();
+process.on('SIGINT', () => {
+  console.log('\n👋 Bot shutting down...');
   process.exit(0);
 });
 
-runBot().catch(console.error);
+runBot().catch((e) => {
+  console.error('❌ Fatal error:', e);
+  process.exit(1);
+});
