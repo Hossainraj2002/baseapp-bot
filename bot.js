@@ -1,6 +1,6 @@
 // ========================================
-// BASEAPP ULTIMATE BOT - COMPLETE SYSTEM
-// All features enabled, perfect Neynar integration
+// BASEAPP ULTIMATE BOT - FIXED VERSION
+// Better natural language, clearer responses
 // ========================================
 
 import Anthropic from '@anthropic-ai/sdk';
@@ -14,9 +14,9 @@ dotenv.config();
 // ===== CONFIGURATION =====
 const CONFIG = {
   PLATFORM_NAME: 'BaseApp',
-  POLL_INTERVAL: 60000, // 1 minute (you have API credits!)
-  DAILY_POST_TIME_UTC: 10, // 10 AM UTC
-  ENABLE_DAILY_POSTS: true, // ENABLED NOW!
+  POLL_INTERVAL: 60000,
+  DAILY_POST_TIME_UTC: 10,
+  ENABLE_DAILY_POSTS: true,
   MAX_TWEET_LENGTH: 280,
 };
 
@@ -38,7 +38,6 @@ const anthropic = new Anthropic({
 const processedTweets = new Set();
 let lastMentionId = null;
 let lastDailyPost = null;
-let currentDayInCycle = 0;
 
 let dataCache = {
   overview: null,
@@ -71,20 +70,14 @@ async function loadData() {
     };
 
     console.log('✅ Data loaded');
-    console.log(`   Users: ${dataCache.overview.all_time.unique_users.toLocaleString()}`);
-    console.log(`   All-time: $${dataCache.overview.all_time.total_usdc.toLocaleString()}`);
   } catch (error) {
     console.error('❌ Error loading data:', error.message);
     throw error;
   }
 }
 
-// ===== NEYNAR API - SUPER ROBUST =====
+// ===== NEYNAR API =====
 
-/**
- * Get user by username from Neynar
- * ROBUST: Tries multiple times, handles all errors
- */
 async function getNeynarUserByUsername(username, retries = 3) {
   const apiKey = process.env.NEYNAR_API_KEY;
   if (!apiKey) throw new Error('NEYNAR_API_KEY required!');
@@ -93,7 +86,7 @@ async function getNeynarUserByUsername(username, retries = 3) {
 
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
-      console.log(`🔍 Neynar lookup: ${cleanUsername} (attempt ${attempt}/${retries})`);
+      console.log(`🔍 Neynar lookup: ${cleanUsername} (${attempt}/${retries})`);
       
       const response = await fetch(
         `https://api.neynar.com/v2/farcaster/user/by_username?username=${encodeURIComponent(cleanUsername)}`,
@@ -102,18 +95,12 @@ async function getNeynarUserByUsername(username, retries = 3) {
             'accept': 'application/json',
             'api_key': apiKey,
           },
-          signal: AbortSignal.timeout(10000), // 10s timeout
+          signal: AbortSignal.timeout(10000),
         }
       );
 
-      if (response.status === 404) {
-        console.log(`   User not found on Farcaster`);
-        return null;
-      }
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
+      if (response.status === 404) return null;
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
       const data = await response.json();
       const user = data.user;
@@ -133,22 +120,15 @@ async function getNeynarUserByUsername(username, retries = 3) {
         verified_addresses: user.verified_addresses || { eth_addresses: [] },
       };
     } catch (error) {
-      console.error(`   ⚠️  Attempt ${attempt} failed:`, error.message);
-      
       if (attempt < retries) {
         await new Promise(resolve => setTimeout(resolve, 2000 * attempt));
       }
     }
   }
 
-  console.error(`   ❌ All attempts failed for ${cleanUsername}`);
   return null;
 }
 
-/**
- * Get user's casts for a time period
- * EXACTLY like your miniapp does it!
- */
 async function getUserCasts(fid, startMs, endMs) {
   const apiKey = process.env.NEYNAR_API_KEY;
   if (!apiKey) return [];
@@ -157,7 +137,6 @@ async function getUserCasts(fid, startMs, endMs) {
   let cursor = null;
 
   try {
-    // Fetch up to 500 casts (5 pages)
     for (let page = 0; page < 5; page++) {
       const url = new URL('https://api.neynar.com/v2/farcaster/feed/user/casts');
       url.searchParams.set('fid', String(fid));
@@ -175,10 +154,7 @@ async function getUserCasts(fid, startMs, endMs) {
         signal: AbortSignal.timeout(15000),
       });
 
-      if (!response.ok) {
-        console.error(`   Neynar casts API error: ${response.status}`);
-        break;
-      }
+      if (!response.ok) break;
 
       const json = await response.json();
       const items = json.casts || [];
@@ -193,16 +169,12 @@ async function getUserCasts(fid, startMs, endMs) {
           casts.push(cast);
         }
         
-        // If cast is older than our window, stop fetching
-        if (castMs < startMs) {
-          return casts;
-        }
+        if (castMs < startMs) return casts;
       }
 
       cursor = json.next?.cursor || null;
       if (!cursor) break;
       
-      // Small delay between pages
       await new Promise(resolve => setTimeout(resolve, 500));
     }
   } catch (error) {
@@ -212,16 +184,10 @@ async function getUserCasts(fid, startMs, endMs) {
   return casts;
 }
 
-/**
- * Get social stats for a period
- * EXACTLY like miniapp's /api/social endpoint
- */
 async function getSocialStats(fid, startIso, endIso) {
   try {
     const startMs = new Date(startIso).getTime();
     const endMs = new Date(endIso).getTime();
-
-    console.log(`   📊 Getting social stats for FID ${fid}`);
 
     const casts = await getUserCasts(fid, startMs, endMs);
 
@@ -245,21 +211,105 @@ async function getSocialStats(fid, startIso, endIso) {
       replies: totalReplies,
     };
   } catch (error) {
-    console.error('   Error getting social stats:', error.message);
     return null;
   }
 }
 
+// ===== SMART QUERY PARSING (NO CLAUDE NEEDED!) =====
+
+function parseQuery(message) {
+  const lower = message.toLowerCase().trim();
+
+  // Extract username/address patterns
+  const usernameMatch = message.match(/(?:for|of|about|show|stats|check|data)\\s+(@?[a-zA-Z0-9._-]+)/i);
+  const addressMatch = message.match(/(0x[a-fA-F0-9]{40})/);
+  const ethNameMatch = message.match(/([a-zA-Z0-9._-]+\\.eth)/i);
+
+  // User stats queries
+  if (
+    lower.includes('stat') ||
+    lower.includes('earn') ||
+    lower.includes('rank') ||
+    lower.includes('show') ||
+    lower.includes('data') ||
+    lower.includes('check') ||
+    lower.includes('how much') ||
+    lower.includes('profile') ||
+    usernameMatch ||
+    addressMatch ||
+    ethNameMatch
+  ) {
+    const identifier = 
+      usernameMatch?.[1] ||
+      addressMatch?.[1] ||
+      ethNameMatch?.[1] ||
+      null;
+
+    return {
+      type: 'user_stats',
+      identifier: identifier?.replace(/@/g, ''),
+    };
+  }
+
+  // Leaderboard queries
+  if (
+    lower.includes('top') ||
+    lower.includes('leader') ||
+    lower.includes('rank') ||
+    lower.includes('best') ||
+    lower.includes('winner')
+  ) {
+    const allTime = lower.includes('all') || lower.includes('total') || lower.includes('lifetime');
+    const countMatch = lower.match(/top\\s+(\\d+)/);
+    
+    return {
+      type: allTime ? 'leaderboard_alltime' : 'leaderboard_weekly',
+      count: countMatch ? parseInt(countMatch[1]) : 10,
+    };
+  }
+
+  // Platform overview
+  if (
+    lower.includes('platform') ||
+    lower.includes('overview') ||
+    lower.includes('summary') ||
+    lower.includes('total') ||
+    lower.includes('distributed')
+  ) {
+    return { type: 'platform_overview' };
+  }
+
+  // Help
+  if (
+    lower.includes('help') ||
+    lower.includes('command') ||
+    lower.includes('how') ||
+    lower.includes('what can')
+  ) {
+    return { type: 'help' };
+  }
+
+  // Default: If message is short and looks like a username, treat as user stats
+  if (message.length < 50 && !lower.includes('?')) {
+    const words = message.trim().split(/\\s+/);
+    if (words.length <= 3) {
+      return {
+        type: 'user_stats',
+        identifier: words[words.length - 1].replace(/@/g, ''),
+      };
+    }
+  }
+
+  return { type: 'help' };
+}
+
 // ===== USER LOOKUP =====
 
-/**
- * Find user in cache first (fast!)
- */
 function findUserInCache(identifier) {
   identifier = identifier.toLowerCase().trim();
   const cleanId = identifier.replace(/\\.base\\.eth$/i, '').replace(/\\.eth$/i, '').replace(/@/g, '');
 
-  // Try direct address match first
+  // Try direct address match
   for (const [address, data] of Object.entries(dataCache.farcasterMap)) {
     if (address.toLowerCase() === identifier) {
       return { address: address.toLowerCase(), farcaster: data, source: 'cache' };
@@ -273,11 +323,10 @@ function findUserInCache(identifier) {
     const username = (data.username || '').toLowerCase();
     const usernameBase = username.split('.')[0];
 
-    if (username.includes(cleanId) || cleanId.includes(usernameBase)) {
+    if (username.includes(cleanId) || cleanId.includes(usernameBase) || usernameBase === cleanId) {
       return { address: address.toLowerCase(), farcaster: data, source: 'cache' };
     }
 
-    // Also try display name
     const displayName = (data.display_name || '').toLowerCase();
     if (displayName === cleanId) {
       return { address: address.toLowerCase(), farcaster: data, source: 'cache' };
@@ -287,38 +336,29 @@ function findUserInCache(identifier) {
   return null;
 }
 
-/**
- * Smart user lookup: Cache first, then Neynar
- */
 async function findUser(identifier) {
-  // Try cache first (fast!)
   const cached = findUserInCache(identifier);
   if (cached) {
     console.log(`   ✅ Found in cache`);
     return cached;
   }
 
-  // Try Neynar
   console.log(`   🔍 Not in cache, trying Neynar...`);
   const neynarUser = await getNeynarUserByUsername(identifier);
   
-  if (!neynarUser) {
-    return null;
-  }
+  if (!neynarUser) return null;
 
-  // Match Neynar addresses to reward data
   const ethAddresses = neynarUser.verified_addresses?.eth_addresses || [];
 
   for (const addr of ethAddresses) {
     const normalized = addr.toLowerCase();
 
-    // Check all-time leaderboard
     const allTimeEntry = dataCache.allTimeLeaderboard.rows.find(
       row => row.address.toLowerCase() === normalized
     );
 
     if (allTimeEntry) {
-      console.log(`   ✅ Matched ${addr} to rewards!`);
+      console.log(`   ✅ Matched to rewards!`);
       return {
         address: normalized,
         farcaster: neynarUser,
@@ -327,7 +367,6 @@ async function findUser(identifier) {
     }
   }
 
-  // User exists but no rewards
   return {
     address: null,
     farcaster: neynarUser,
@@ -335,8 +374,6 @@ async function findUser(identifier) {
     hasRewards: false,
   };
 }
-
-// ===== STATS GATHERING =====
 
 function getUserRewardStats(address) {
   if (!address) return null;
@@ -354,7 +391,7 @@ function getUserRewardStats(address) {
   return { allTime, weekly };
 }
 
-// ===== RESPONSE FORMATTING =====
+// ===== RESPONSE FORMATTING (CLEANER!) =====
 
 async function formatCompleteUserStats(identifier) {
   console.log(`\\n📊 Getting stats for: ${identifier}`);
@@ -362,24 +399,22 @@ async function formatCompleteUserStats(identifier) {
   const user = await findUser(identifier);
 
   if (!user) {
-    return `❌ User "${identifier}" not found. Try their ${CONFIG.PLATFORM_NAME} username or wallet address.`;
+    return `❌ Sorry, I couldn't find "${identifier}".\\n\\nTry:\\n• Their ${CONFIG.PLATFORM_NAME} username\\n• Their wallet address\\n• username.base.eth format`;
   }
 
-  const { address, farcaster, hasRewards, source } = user;
+  const { address, farcaster, hasRewards } = user;
 
-  // Get reward stats if has address
   let stats = null;
   if (address) {
     stats = getUserRewardStats(address);
   }
 
-  // If no rewards yet
+  // User has no rewards yet
   if (!address || hasRewards === false) {
-    let response = `👋 Hey ${farcaster.display_name || identifier}!\\n\\n`;
-    response += `I found you on ${CONFIG.PLATFORM_NAME}, but you haven't earned rewards yet.\\n\\n`;
-    response += `💡 **Start earning:** Create quality content on ${CONFIG.PLATFORM_NAME}!\\n\\n`;
+    let response = `👋 ${farcaster.display_name || identifier}!\\n\\n`;
+    response += `I found you, but you haven't earned ${CONFIG.PLATFORM_NAME} rewards yet.\\n\\n`;
     
-    // Get social stats anyway
+    // Still show their activity!
     if (farcaster.fid) {
       const latestWeekStart = dataCache.weeklyLeaderboard.latest_week_start_utc;
       if (latestWeekStart) {
@@ -390,55 +425,50 @@ async function formatCompleteUserStats(identifier) {
         );
 
         if (social) {
-          response += `📱 **Your Activity This Week:**\\n`;
-          response += `Posts: ${social.casts}\\n`;
-          response += `Likes: ${social.likes}\\n`;
-          response += `Recasts: ${social.recasts}\\n`;
-          response += `Replies: ${social.replies}\\n\\n`;
+          response += `📱 This Week:\\n`;
+          response += `• ${social.casts} posts\\n`;
+          response += `• ${social.likes} likes\\n`;
+          response += `• ${social.recasts} recasts\\n\\n`;
         }
       }
     }
 
-    response += `👥 **Community:**\\n`;
-    response += `Followers: ${farcaster.follower_count?.toLocaleString() || 0}\\n`;
-    response += `Following: ${farcaster.following_count?.toLocaleString() || 0}\\n\\n`;
-    response += `Next week could be yours! 🚀`;
+    response += `👥 ${farcaster.follower_count?.toLocaleString() || 0} followers\\n\\n`;
+    response += `💡 Start creating on ${CONFIG.PLATFORM_NAME} to earn rewards! 🚀`;
 
     return response;
   }
 
-  // Build full response with ALL data
-  let response = `📊 **Stats for ${farcaster.display_name}** (@${farcaster.username})\\n\\n`;
+  // Full stats response
+  let response = `📊 ${farcaster.display_name} (@${farcaster.username})\\n\\n`;
 
-  // ===== ON-CHAIN REWARDS =====
+  // Rewards
   if (stats?.allTime) {
-    response += `💰 **ALL-TIME REWARDS**\\n`;
-    response += `Total Earned: $${stats.allTime.total_usdc}\\n`;
-    response += `Rank: #${stats.allTime.all_time_rank} 🏆\\n`;
-    response += `Weeks Earned: ${stats.allTime.total_weeks_earned}\\n\\n`;
+    response += `💰 ALL-TIME\\n`;
+    response += `• Earned: $${stats.allTime.total_usdc}\\n`;
+    response += `• Rank: #${stats.allTime.all_time_rank} 🏆\\n`;
+    response += `• Weeks: ${stats.allTime.total_weeks_earned}\\n\\n`;
   }
 
   if (stats?.weekly) {
-    response += `📈 **THIS WEEK**\\n`;
-    response += `Earned: $${stats.weekly.this_week_usdc}\\n`;
-    response += `Rank: #${stats.weekly.rank}\\n`;
-    response += `Previous Week: $${stats.weekly.previous_week_usdc}\\n`;
+    response += `📈 THIS WEEK\\n`;
+    response += `• $${stats.weekly.this_week_usdc} (Rank #${stats.weekly.rank})\\n`;
+    response += `• Last week: $${stats.weekly.previous_week_usdc}\\n`;
 
     if (stats.weekly.pct_change) {
       const change = parseFloat(stats.weekly.pct_change);
       const arrow = change > 0 ? '📈' : change < 0 ? '📉' : '→';
-      response += `Change: ${change >= 0 ? '+' : ''}${stats.weekly.pct_change}% ${arrow}\\n`;
+      response += `• Change: ${change >= 0 ? '+' : ''}${stats.weekly.pct_change}% ${arrow}\\n`;
     }
     response += '\\n';
   }
 
-  // ===== SOCIAL STATS (TWO PERIODS) =====
+  // Social stats
   if (farcaster.fid) {
     const latestWeekStart = dataCache.weeklyLeaderboard.latest_week_start_utc;
     const previousWeekStart = dataCache.weeklyLeaderboard.previous_week_start_utc;
 
     if (latestWeekStart) {
-      // Current week
       const currentSocial = await getSocialStats(
         farcaster.fid,
         latestWeekStart,
@@ -446,14 +476,13 @@ async function formatCompleteUserStats(identifier) {
       );
 
       if (currentSocial) {
-        response += `📱 **${CONFIG.PLATFORM_NAME.toUpperCase()} ACTIVITY (This Week)**\\n`;
-        response += `Posts: ${currentSocial.casts}\\n`;
-        response += `Likes: ${currentSocial.likes}\\n`;
-        response += `Recasts: ${currentSocial.recasts}\\n`;
-        response += `Replies: ${currentSocial.replies}\\n\\n`;
+        response += `📱 THIS WEEK\\n`;
+        response += `• ${currentSocial.casts} posts\\n`;
+        response += `• ${currentSocial.likes} likes received\\n`;
+        response += `• ${currentSocial.recasts} recasts\\n`;
+        response += `• ${currentSocial.replies} replies\\n\\n`;
       }
 
-      // Previous week
       if (previousWeekStart) {
         const previousSocial = await getSocialStats(
           farcaster.fid,
@@ -462,22 +491,19 @@ async function formatCompleteUserStats(identifier) {
         );
 
         if (previousSocial) {
-          response += `📱 **${CONFIG.PLATFORM_NAME.toUpperCase()} ACTIVITY (Last Week)**\\n`;
-          response += `Posts: ${previousSocial.casts}\\n`;
-          response += `Likes: ${previousSocial.likes}\\n`;
-          response += `Recasts: ${previousSocial.recasts}\\n`;
-          response += `Replies: ${previousSocial.replies}\\n\\n`;
+          response += `📱 LAST WEEK\\n`;
+          response += `• ${previousSocial.casts} posts\\n`;
+          response += `• ${previousSocial.likes} likes\\n`;
+          response += `• ${previousSocial.recasts} recasts\\n`;
+          response += `• ${previousSocial.replies} replies\\n\\n`;
         }
       }
     }
   }
 
-  // ===== COMMUNITY =====
-  response += `👥 **COMMUNITY**\\n`;
-  response += `Followers: ${farcaster.follower_count?.toLocaleString() || 0}\\n`;
-  response += `Following: ${farcaster.following_count?.toLocaleString() || 0}\\n\\n`;
-
-  response += `🎉 Keep creating on ${CONFIG.PLATFORM_NAME}! 🚀`;
+  // Community
+  response += `👥 ${farcaster.follower_count?.toLocaleString() || 0} followers\\n\\n`;
+  response += `Keep creating! 🚀`;
 
   return response;
 }
@@ -490,22 +516,22 @@ function formatLeaderboard(type = 'weekly', count = 10) {
   const topN = data.rows.slice(0, count);
 
   let response = type === 'weekly'
-    ? `🏆 **${CONFIG.PLATFORM_NAME} Top ${count} - This Week**\\n\\n`
-    : `🏆 **${CONFIG.PLATFORM_NAME} Top ${count} - All-Time**\\n\\n`;
+    ? `🏆 Top ${count} This Week\\n\\n`
+    : `🏆 Top ${count} All-Time\\n\\n`;
 
   topN.forEach((user, idx) => {
     const fc = dataCache.farcasterMap[user.address.toLowerCase()];
-    const name = fc?.username || `User${idx + 1}`;
+    const name = fc?.username || `user${idx + 1}`;
 
     if (type === 'weekly') {
-      response += `${idx + 1}. @${name}: $${user.this_week_usdc} 💰\\n`;
+      response += `${idx + 1}. @${name} - $${user.this_week_usdc}\\n`;
     } else {
-      response += `${idx + 1}. @${name}: $${user.total_usdc} (${user.total_weeks_earned} wks)\\n`;
+      response += `${idx + 1}. @${name} - $${user.total_usdc}\\n`;
     }
   });
 
   if (type === 'weekly') {
-    response += `\\nTotal: $${dataCache.overview.latest_week.total_usdc.toLocaleString()} to ${dataCache.overview.latest_week.unique_users.toLocaleString()} creators! 🎊`;
+    response += `\\n$${dataCache.overview.latest_week.total_usdc.toLocaleString()} to ${dataCache.overview.latest_week.unique_users.toLocaleString()} creators! 🎉`;
   }
 
   return response;
@@ -514,79 +540,43 @@ function formatLeaderboard(type = 'weekly', count = 10) {
 function formatOverview() {
   const ov = dataCache.overview;
 
-  let response = `📊 **${CONFIG.PLATFORM_NAME} Platform Overview**\\n\\n`;
-  response += `💎 **ALL-TIME**\\n`;
-  response += `Distributed: $${ov.all_time.total_usdc.toLocaleString()}\\n`;
-  response += `Unique Users: ${ov.all_time.unique_users.toLocaleString()}\\n\\n`;
+  let response = `📊 ${CONFIG.PLATFORM_NAME} Overview\\n\\n`;
+  response += `💎 ALL-TIME\\n`;
+  response += `• $${ov.all_time.total_usdc.toLocaleString()} distributed\\n`;
+  response += `• ${ov.all_time.unique_users.toLocaleString()} unique users\\n\\n`;
 
-  response += `📈 **THIS WEEK**\\n`;
-  response += `Rewards: $${ov.latest_week.total_usdc.toLocaleString()}\\n`;
-  response += `Eligible: ${ov.latest_week.unique_users.toLocaleString()}\\n\\n`;
+  response += `📈 THIS WEEK\\n`;
+  response += `• $${ov.latest_week.total_usdc.toLocaleString()} in rewards\\n`;
+  response += `• ${ov.latest_week.unique_users.toLocaleString()} eligible users\\n\\n`;
 
-  response += `💰 **BREAKDOWN (Top 5 Tiers)**\\n`;
-  ov.latest_week.breakdown.slice(0, 5).forEach(tier => {
-    response += `$${tier.reward_usdc}: ${tier.users} users\\n`;
-  });
+  response += `💰 Top rewards: $${ov.latest_week.breakdown[0]?.reward_usdc || 0} to ${ov.latest_week.breakdown[0]?.users || 0} users`;
 
   return response;
 }
 
-// ===== QUERY PARSING WITH CLAUDE =====
-
-async function parseQueryWithClaude(message) {
-  try {
-    const systemPrompt = `You are a query parser for ${CONFIG.PLATFORM_NAME} rewards bot. Extract structured data from user queries.
-
-Query types:
-- user_stats: User asking for someone's stats/earnings/rank
-- leaderboard_weekly: Top performers this week
-- leaderboard_alltime: Top performers all-time
-- platform_overview: Platform stats, total rewards, summary
-- help: User asking how to use bot
-
-For user_stats, extract the username/address from queries like:
-- "stats for femiii"
-- "how much did @alice earn"
-- "show akbaronchain"
-- "femiii.base.eth"
-- "check 0x123..."
-
-Respond ONLY with JSON:
-{
-  "type": "query_type",
-  "identifier": "username or address",
-  "count": 10
-}`;
-
-    const response = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 200,
-      system: systemPrompt,
-      messages: [{ role: 'user', content: message }],
-    });
-
-    const text = response.content[0].text.trim();
-    const jsonMatch = text.match(/\\{[\\s\\S]*\\}/);
-
-    if (jsonMatch) {
-      return JSON.parse(jsonMatch[0]);
-    }
-
-    return { type: 'help' };
-  } catch (error) {
-    console.error('Parse error:', error.message);
-    return { type: 'help' };
-  }
+function formatHelp() {
+  return `👋 ${CONFIG.PLATFORM_NAME} Bot\\n\\n` +
+         `Try these:\\n\\n` +
+         `📊 "stats for [username]"\\n` +
+         `   Example: stats for femiii\\n\\n` +
+         `🏆 "top 10"\\n` +
+         `   Shows weekly leaderboard\\n\\n` +
+         `💰 "platform stats"\\n` +
+         `   Shows overview\\n\\n` +
+         `Just ask naturally!`;
 }
+
+// ===== GENERATE RESPONSE =====
 
 async function generateResponse(message, twitterUsername) {
   try {
-    const query = await parseQueryWithClaude(message);
-    console.log('   Query type:', query.type);
+    const query = parseQuery(message);
+    console.log('   Type:', query.type, query.identifier || '');
 
     switch (query.type) {
       case 'user_stats':
         const id = query.identifier || twitterUsername;
+        if (!id) return formatHelp();
         return await formatCompleteUserStats(id);
 
       case 'leaderboard_weekly':
@@ -598,18 +588,12 @@ async function generateResponse(message, twitterUsername) {
       case 'platform_overview':
         return formatOverview();
 
-      case 'help':
       default:
-        return `👋 **${CONFIG.PLATFORM_NAME} Bot Commands:**\\n\\n` +
-               `📊 "stats for [username]" - User stats\\n` +
-               `🏆 "top 10" - Weekly leaderboard\\n` +
-               `💰 "all-time top 10" - All-time leaders\\n` +
-               `📈 "platform stats" - Overview\\n\\n` +
-               `Just mention me and ask!`;
+        return formatHelp();
     }
   } catch (error) {
     console.error('Response error:', error.message);
-    return `Sorry, I'm having trouble! Please try again. 🤖`;
+    return `Sorry, something went wrong! Try again or type "help" for commands.`;
   }
 }
 
@@ -645,7 +629,7 @@ async function replyToTweet(tweetId, message) {
 
     for (let i = 0; i < tweets.length; i++) {
       const text = tweets.length > 1
-        ? `(${i + 1}/${tweets.length})\\n${tweets[i]}`
+        ? `(${i + 1}/${tweets.length})\\n\\n${tweets[i]}`
         : tweets[i];
 
       const response = await rwClient.v2.reply(text, lastId);
@@ -692,7 +676,7 @@ async function processMentions(botUserId) {
       const author = mentions.includes?.users?.find(u => u.id === tweet.author_id);
       const username = author?.username || 'user';
 
-      console.log(`\\n📨 Mention from @${username}`);
+      console.log(`\\n📨 @${username}: ${tweet.text.substring(0, 50)}...`);
 
       const message = tweet.text.replace(/@\\w+/g, '').trim();
       const response = await generateResponse(message, username);
@@ -701,14 +685,12 @@ async function processMentions(botUserId) {
 
       processedTweets.add(tweet.id);
 
-      // Small delay between replies
       await new Promise(r => setTimeout(r, 3000));
     }
   } catch (error) {
-    console.error('❌ Error processing mentions:', error.message);
+    console.error('❌ Error:', error.message);
     
     if (error.code === 429) {
-      console.log('   ⏳ Rate limited, waiting 15min...');
       await new Promise(r => setTimeout(r, 15 * 60 * 1000));
     }
   }
@@ -724,7 +706,7 @@ function getDayInCycle() {
   const now = new Date();
   const days = Math.floor((now - start) / (1000 * 60 * 60 * 24));
 
-  return (days % 10) + 1; // 1-10
+  return (days % 10) + 1;
 }
 
 function getWeekNumber() {
@@ -736,7 +718,6 @@ async function postDailyWinners() {
     const today = new Date().toISOString().split('T')[0];
 
     if (lastDailyPost === today) {
-      console.log('📅 Already posted today');
       return;
     }
 
@@ -746,19 +727,19 @@ async function postDailyWinners() {
     const startRank = (day - 1) * 10 + 1;
     const endRank = day * 10;
 
-    console.log(`\\n📅 Posting daily winners: Day ${day}/10, Ranks ${startRank}-${endRank}`);
+    console.log(`\\n📅 Daily post: Day ${day}/10, Ranks ${startRank}-${endRank}`);
 
     const winners = dataCache.weeklyLeaderboard.rows
       .filter(r => r.rank >= startRank && r.rank <= endRank)
       .slice(0, 10);
 
     if (!winners.length) {
-      console.log('   No winners for this range');
+      console.log('   No winners');
       return;
     }
 
-    let post = `🏆 ${CONFIG.PLATFORM_NAME} Weekly Rewards - Week ${week}\\n\\n`;
-    post += `Top Performers (#${startRank}-${endRank}):\\n\\n`;
+    let post = `🏆 ${CONFIG.PLATFORM_NAME} Week ${week}\\n\\n`;
+    post += `Top #${startRank}-${endRank}:\\n\\n`;
 
     winners.forEach(w => {
       const fc = dataCache.farcasterMap[w.address.toLowerCase()];
@@ -768,8 +749,7 @@ async function postDailyWinners() {
       post += `${w.rank}. @${username} - $${w.this_week_usdc} ${emoji}\\n`;
     });
 
-    post += `\\nKeep creating on ${CONFIG.PLATFORM_NAME}! 🚀\\n`;
-    post += `#${CONFIG.PLATFORM_NAME} #Rewards #Base`;
+    post += `\\nKeep creating! 🚀`;
 
     await rwClient.v2.tweet(post);
 
@@ -783,27 +763,23 @@ async function postDailyWinners() {
 // ===== MAIN BOT =====
 
 async function runBot() {
-  console.log(`\\n🤖 ${CONFIG.PLATFORM_NAME} ULTIMATE BOT Starting...\\n`);
+  console.log(`\\n🤖 ${CONFIG.PLATFORM_NAME} Bot Starting...\\n`);
 
   await loadData();
 
   const me = await rwClient.v2.me();
   const botUserId = me.data.id;
 
-  console.log(`✅ Authenticated as @${me.data.username}`);
-  console.log(`👂 Listening for mentions...`);
-  console.log(`📅 Daily posts: ${CONFIG.ENABLE_DAILY_POSTS ? 'ENABLED' : 'DISABLED'}\\n`);
-  console.log('─'.repeat(60));
+  console.log(`✅ @${me.data.username}`);
+  console.log(`👂 Listening...`);
+  console.log(`📅 Daily posts: ${CONFIG.ENABLE_DAILY_POSTS ? 'ON' : 'OFF'}\\n`);
 
-  // Initial mention check
   await processMentions(botUserId);
 
-  // Poll for mentions
   setInterval(async () => {
     await processMentions(botUserId);
   }, CONFIG.POLL_INTERVAL);
 
-  // Daily posting check (every hour)
   if (CONFIG.ENABLE_DAILY_POSTS) {
     setInterval(async () => {
       const hour = new Date().getUTCHours();
@@ -811,17 +787,11 @@ async function runBot() {
         await postDailyWinners();
       }
     }, 60 * 60 * 1000);
-
-    // Check on startup too
-    const hour = new Date().getUTCHours();
-    if (hour === CONFIG.DAILY_POST_TIME_UTC) {
-      setTimeout(() => postDailyWinners(), 10000);
-    }
   }
 }
 
 process.on('SIGINT', () => {
-  console.log('\\n👋 Bot shutting down...');
+  console.log('\\n👋 Shutting down...');
   process.exit(0);
 });
 
