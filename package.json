@@ -1,18 +1,19 @@
 {
   "name": "baseapp-ultimate-bot",
-  "version": "2.0.0",
-  "description": "Ultimate BaseApp Twitter Bot - All features enabled!",
+  "version": "3.0.0",
+  "description": "Production-ready BaseApp Twitter Bot with state persistence and daily auto-posting",
   "type": "module",
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js"
   },
-  "keywords": ["twitter", "bot", "baseapp", "rewards"],
-  "author": "BaseApp Team",
-  "license": "MIT",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.1",
     "twitter-api-v2": "^1.17.2",
-    "dotenv": "^16.4.7"
+    "dotenv": "^16.4.7",
+    "node-cron": "^3.0.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   }
 }
