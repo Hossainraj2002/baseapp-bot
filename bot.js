@@ -178,6 +178,9 @@ const DEFAULT_STATE = {
 let state = structuredClone(DEFAULT_STATE);
 
 async function atomicWriteJson(filePath, obj) {
+  // Ensure directory exists (Railway may not have the mount path unless you attach a Volume)
+  const dir = path.dirname(filePath);
+  await fs.mkdir(dir, { recursive: true });
   const tmp = `${filePath}.tmp`;
   await fs.writeFile(tmp, JSON.stringify(obj, null, 2), 'utf-8');
   await fs.rename(tmp, filePath);
