@@ -1125,7 +1125,7 @@ async function runBot() {
   setupDailyAutopost();
 
   // Poll mentions
-  const pollMs = Number(process.env.POLL_INTERVAL_MS || 60_000);
+  const pollMs = Number(process.env.POLL_INTERVAL_MS || 10_000);
   console.log(`👂 Listening for mentions (poll every ${Math.round(pollMs / 1000)}s)...\n`);
 
   // initial poll after bootstrap (should be empty unless new mentions came in)
