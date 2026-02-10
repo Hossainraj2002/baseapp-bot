@@ -6,29 +6,21 @@ import path from 'path';
 import cron from 'node-cron';
 
 dotenv.config();
-const CONFIG = {
-  PLATFORM_NAME: 'BaseApp',
-  MINIAPP_LINK: 'Visit Baseapp reward dashboard miniapp on @baseapp:\nhttps://base.app/app/baseapp-reward-dashboard.vercel.app',
-  
-  STATE_FILE: './state.json',
-  POLL_INTERVAL: parseInt(process.env.POLL_INTERVAL) || 60000,
-  
-  ENABLE_DAILY_POSTS: process.env.ENABLE_DAILY_POSTS === 'true',
-  DAILY_POSTS_PER_DAY: parseInt(process.env.DAILY_POSTS_PER_DAY) || 10,
-  DAILY_POST_TIMES: (process.env.DAILY_POST_TIMES || '00:30,02:30,04:30,06:30,08:30,10:30,12:30,14:30,16:30,18:30').split(','),
-  
-  ACTIVITY_CACHE_TTL: 15 * 60 * 1000,
-};
+
 /**
  * ========================================================
- * BRAND + LINK RULES (DO NOT VIOLATE)
+ * BRAND RULES (DO NOT VIOLATE)
  * ========================================================
  * - Never output the word "Farcaster" in any reply/post.
  * - User-facing copy must say BaseApp / BaseApp activity / BaseApp profile.
- * - Footer link must be appended to every non-help, non-clarification reply.
+ *
+ * LINK RULE (UPDATED):
+ * - Replies should NOT include the miniapp link.
+ * - The miniapp link should appear ONLY in the "overview" reply.
+ * - (Standalone daily posts may include the miniapp link.)
  */
 
-const FOOTER = [
+const OVERVIEW_FOOTER = [
   'Visit Baseapp reward dashboard miniapp on @baseapp:',
   'https://base.app/app/baseapp-reward-dashboard.vercel.app',
 ].join('\n');
@@ -47,14 +39,15 @@ const HELP_TEXT = (mentionUsername) => [
 ].join('\n');
 
 function mustHaveFooter(kind) {
-  // kind: 'help' | 'clarify' | 'normal'
-  return kind === 'normal';
+  // kind: 'help' | 'clarify' | 'normal' | 'overview' | 'daily'
+  // Only OVERVIEW replies (and standalone daily posts) should include the link.
+  return kind === 'overview' || kind === 'daily';
 }
 
 function appendFooter(text, kind) {
   if (!mustHaveFooter(kind)) return text;
-  if (text.includes(FOOTER)) return text;
-  return `${text}\n\n${FOOTER}`;
+  if (text.includes(OVERVIEW_FOOTER)) return text;
+  return `${text}\n\n${OVERVIEW_FOOTER}`;
 }
 
 function utcDateYmd(d = new Date()) {
@@ -139,6 +132,7 @@ function extractFirstIdentifier(message) {
 
   return { kind: 'none', value: '' };
 }
+
 
 /**
  * ========================================================
@@ -672,13 +666,13 @@ function formatOverview() {
   const weekNumber = meta?.week_number ?? '?';
   const weekLabel = meta?.week_label ?? weekStart;
 
-  let out = `📊 BASEAPP REWARDS OVERVIEW (Latest Week: Week ${weekNumber} — ${weekLabel})\n`;
-  out += `Total USDC distributed (latest week): $${formatMoney(o.latest_week.total_usdc)}\n`;
-  out += `Unique creators rewarded (latest week): ${o.latest_week.unique_users}\n`;
-  out += `All-time distributed: $${formatMoney(o.all_time.total_usdc)}\n`;
-  out += `All-time unique creators: ${o.all_time.unique_users.toLocaleString?.() || o.all_time.unique_users}\n`;
-  out += `Reward distributor: ${o.reward_distributor}\n`;
-  return out;
+  const latestUsd = formatMoney(o?.latest_week?.total_usdc ?? 0);
+  const latestUsers = o?.latest_week?.unique_users ?? 0;
+  const allUsd = formatMoney(o?.all_time?.total_usdc ?? 0);
+  const allUsers = o?.all_time?.unique_users ?? 0;
+
+  // Keep overview compact so it fits in a SINGLE reply (the link footer is appended).
+  return `📊 BaseApp rewards overview — Week ${weekNumber} (${weekLabel})\nLatest week: $${latestUsd} • ${latestUsers} creators\nAll-time: $${allUsd} • ${Number(allUsers).toLocaleString?.() || allUsers} creators`;
 }
 
 function formatBreakdown() {
@@ -688,11 +682,9 @@ function formatBreakdown() {
   const weekNumber = meta?.week_number ?? '?';
   const weekLabel = meta?.week_label ?? weekStart;
 
-  let out = `📊 LATEST WEEK REWARD BREAKDOWN (Week ${weekNumber} — ${weekLabel})\n`;
-  for (const tier of o.latest_week.breakdown || []) {
-    out += `$${formatMoney(tier.reward_usdc)} — ${tier.users} creators\n`;
-  }
-  return out;
+  const tiers = (o?.latest_week?.breakdown || []).slice(0, 6);
+  const body = tiers.map((t) => `$${formatMoney(t.reward_usdc)}:${t.users}`).join(' • ');
+  return `📊 Latest week breakdown — Week ${weekNumber} (${weekLabel})\n${body || 'No breakdown data.'}`;
 }
 
 async function formatUserStats(identifier) {
@@ -743,16 +735,13 @@ async function formatUserStats(identifier) {
 
   const startIso = weekStartYmd ? isoAtUtcMidnight(weekStartYmd) : new Date().toISOString();
   const nowIso = new Date().toISOString();
-  const lastWindowStartIso = addDaysIso(startIso, -7);
-
   // BaseApp activity windows (mirrors miniapp)
+  // Replies must be a SINGLE post, so we keep this output compact.
   let activityThis = null;
-  let activityLast = null;
 
   try {
     if (rec.fid) {
       activityThis = await getBaseAppActivity(rec.fid, startIso, nowIso);
-      activityLast = await getBaseAppActivity(rec.fid, lastWindowStartIso, startIso);
     }
   } catch {
     // leave null; handled below
@@ -760,9 +749,14 @@ async function formatUserStats(identifier) {
 
   const uname = rec.username || identifier;
 
-  // Build response per E1/E2 templates
+  // Compact community counters (keep it short)
   const followerCount = rec.follower_count ?? rec.raw?.follower_count ?? 0;
-  const followingCount = rec.following_count ?? rec.raw?.following_count ?? 0;
+
+  // Build a SINGLE-post reply (no threads). Keep under 280 chars.
+  const followersShort = Number(followerCount).toLocaleString?.() || String(followerCount);
+  const act = activityThis
+    ? `P${activityThis.casts} L${activityThis.likes} Rc${activityThis.recasts} Rp${activityThis.replies}`
+    : 'BaseApp activity temporarily unavailable';
 
   if (allTime || weekly) {
     const allTimeUsd = allTime?.total_usdc ?? 0;
@@ -774,69 +768,11 @@ async function formatUserStats(identifier) {
     const prevWeekUsd = weekly?.previous_week_usdc ?? 0;
     const change = arrowPct(weekly?.pct_change);
 
-    const aThis = activityThis
-      ? `📝 Posts: ${activityThis.casts}\n❤️ Likes received: ${activityThis.likes}\n🔄 Recasts: ${activityThis.recasts}\n✒️ Replies: ${activityThis.replies}`
-      : '(BaseApp activity temporarily unavailable)';
-
-    const aLast = activityLast
-      ? `📝 Posts: ${activityLast.casts}\n❤️ Likes received: ${activityLast.likes}\n🔄 Recasts: ${activityLast.recasts}\n✒️ Replies: ${activityLast.replies}`
-      : '(BaseApp activity temporarily unavailable)';
-
-    const out = [
-      `📊 baseapp creator statistics of  ${uname}`,
-      '',
-      '💰 ALL-TIME REWARDS',
-      `Total Earned: $${formatMoney(allTimeUsd)}`,
-      `Rank: #${allTimeRank} 🏆`,
-      `Weeks Earned: ${weeks}`,
-      '',
-      `📈 LATEST WEEK (Week ${weekNumber} — ${weekLabel})`,
-      `Earned: $${formatMoney(thisWeekUsd)}`,
-      `Rank: #${weeklyRank}`,
-      `Previous Week: $${formatMoney(prevWeekUsd)}`,
-      `Change: ${change}`,
-      '',
-      `📱 BASEAPP ACTIVITY (This Week: ${weekStartYmd} → now)`,
-      aThis,
-      '',
-      `📱 BASEAPP ACTIVITY (Last reward window: ${addDaysIso(startIso, -7).slice(0,10)} → ${weekStartYmd})`,
-      aLast,
-      '',
-      '👥 COMMUNITY',
-      `Followers: ${Number(followerCount).toLocaleString?.() || followerCount}`,
-      `Following: ${Number(followingCount).toLocaleString?.() || followingCount}`,
-      '',
-      '🎉 Keep creating on BaseApp! 🚀',
-    ].join('\n');
-
+    const out = `📊 baseapp stats: ${uname}\n💰 All-time: $${formatMoney(allTimeUsd)} (#${allTimeRank}) • Weeks ${weeks}\n📈 Week ${weekNumber}: $${formatMoney(thisWeekUsd)} (#${weeklyRank}) • Prev $${formatMoney(prevWeekUsd)} • ${change}\n📱 BaseApp activity (This Week): ${act}\n👥 Followers: ${followersShort}`;
     return { kind: 'normal', text: out };
   }
 
-  // No rewards template E2
-  const aThis = activityThis
-    ? `📝 Posts: ${activityThis.casts}\n❤️ Likes received: ${activityThis.likes}\n🔄 Recasts: ${activityThis.recasts}\n✒️ Replies: ${activityThis.replies}`
-    : '(BaseApp activity temporarily unavailable)';
-
-  const aLast = activityLast
-    ? `📝 Posts: ${activityLast.casts}\n❤️ Likes received: ${activityLast.likes}\n🔄 Recasts: ${activityLast.recasts}\n✒️ Replies: ${activityLast.replies}`
-    : '(BaseApp activity temporarily unavailable)';
-
-  const out = [
-    `📊 baseapp creator statistics of  ${uname}`,
-    '',
-    'You didn’t yet earn creator reward from @baseapp — keep creating, you can earn next week 💙🤝',
-    '',
-    `📱 BASEAPP ACTIVITY (This Week: ${weekStartYmd} → now)`,
-    aThis,
-    '',
-    `📱 BASEAPP ACTIVITY (Last reward window: ${addDaysIso(startIso, -7).slice(0,10)} → ${weekStartYmd})`,
-    aLast,
-    '',
-    '👥 COMMUNITY',
-    `Followers: ${Number(followerCount).toLocaleString?.() || followerCount}`,
-    `Following: ${Number(followingCount).toLocaleString?.() || followingCount}`,
-  ].join('\n');
-
+  const out = `📊 baseapp stats: ${uname}\nYou didn’t yet earn creator reward from @baseapp — keep creating 💙\n📱 BaseApp activity (This Week): ${act}\n👥 Followers: ${followersShort}`;
   return { kind: 'normal', text: out };
 }
 
@@ -871,51 +807,27 @@ Rules:
  * Tweet helpers
  * ========================================================
  */
-function splitIntoTweets(text) {
-  const maxLength = 280;
-  if (text.length <= maxLength) return [text];
+function truncateTo(text, maxLen) {
+  const s = String(text ?? '');
+  if (s.length <= maxLen) return s;
+  return s.slice(0, Math.max(0, maxLen - 1)).trimEnd() + '…';
+}
 
-  const lines = text.split('\n');
-  const tweets = [];
-  let current = '';
-
-  for (const line of lines) {
-    const add = (current ? '\n' : '') + line;
-    if ((current + add).length > maxLength) {
-      if (current) tweets.push(current);
-      current = line;
-    } else {
-      current += add;
-    }
-  }
-  if (current) tweets.push(current);
-
-  // still too long lines fallback
-  return tweets.map((t) => (t.length <= maxLength ? t : t.slice(0, maxLength - 3) + '...'));
+// Replies should always be a SINGLE post (no threads).
+// Even if the account has Premium, the API often enforces 280 chars.
+function normalizeReplyText(text) {
+  return truncateTo(text, 280);
 }
 
 async function replyToTweet(tweetId, message) {
-  const tweets = splitIntoTweets(message);
-  let lastTweetId = tweetId;
-
-  for (let i = 0; i < tweets.length; i++) {
-    const tweetText = tweets.length > 1 ? `(${i + 1}/${tweets.length}) ${tweets[i]}` : tweets[i];
-    const res = await rwClient.v2.reply(tweetText, lastTweetId);
-    lastTweetId = res.data.id;
-    if (i < tweets.length - 1) await new Promise((r) => setTimeout(r, 1500));
-  }
+  const tweetText = normalizeReplyText(message);
+  await rwClient.v2.reply(tweetText, tweetId);
 }
 
 async function postStandalone(text) {
-  const tweets = splitIntoTweets(text);
-  let lastId = null;
-
-  for (let i = 0; i < tweets.length; i++) {
-    const tweetText = tweets.length > 1 ? `(${i + 1}/${tweets.length}) ${tweets[i]}` : tweets[i];
-    const res = await rwClient.v2.tweet(tweetText, lastId ? { reply: { in_reply_to_tweet_id: lastId } } : undefined);
-    lastId = res.data.id;
-    if (i < tweets.length - 1) await new Promise((r) => setTimeout(r, 1500));
-  }
+  // Keep standalone posts single as well (safer + avoids accidental threads).
+  const tweetText = truncateTo(text, 280);
+  await rwClient.v2.tweet(tweetText);
 }
 
 /**
@@ -998,10 +910,11 @@ async function processMentions(botUserId, botUsername) {
         kind = res.kind;
         replyText = res.text;
       } else if (intent.type === 'weekly') {
-        replyText = formatWeeklyLeaderboardTopN(Number(process.env.LEADERBOARD_TOP_N || 10));
+        replyText = formatWeeklyLeaderboardTopN(Number(process.env.LEADERBOARD_TOP_N || 5));
       } else if (intent.type === 'alltime') {
-        replyText = formatAllTimeLeaderboardTopN(Number(process.env.LEADERBOARD_TOP_N || 10));
+        replyText = formatAllTimeLeaderboardTopN(Number(process.env.LEADERBOARD_TOP_N || 5));
       } else if (intent.type === 'overview') {
+        kind = 'overview';
         replyText = formatOverview();
       } else if (intent.type === 'breakdown') {
         replyText = formatBreakdown();
@@ -1126,12 +1039,11 @@ async function buildDailyPostForRow(row) {
     '',
     `👥 Followers: ${followers === '—' ? '—' : (Number(followers).toLocaleString?.() || followers)}`,
     '',
-    FOOTER,
-    '',
     `Reply “stats for <username>” to check yours.`,
   ].join('\n');
 
-  return out.replace(/farcaster/gi, 'BaseApp');
+  // Standalone posts may include the miniapp link.
+  return appendFooter(out.replace(/farcaster/gi, 'BaseApp'), 'daily');
 }
 
 async function runDailyPostSlot(slotIndex) {
