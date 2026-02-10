@@ -133,6 +133,17 @@ function extractFirstIdentifier(message) {
   return { kind: 'none', value: '' };
 }
 
+function formatDateRange(startIso, endIso) {
+  // Format as "Feb 4 → Feb 10" or "now" for end
+  const start = new Date(startIso);
+  const end = endIso === 'now' ? 'now' : new Date(endIso);
+  
+  const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const startStr = `${monthNames[start.getUTCMonth()]} ${start.getUTCDate()}`;
+  const endStr = end === 'now' ? 'now' : `${monthNames[end.getUTCMonth()]} ${end.getUTCDate()}`;
+  
+  return `${startStr} → ${endStr}`;
+}
 
 /**
  * ========================================================
@@ -644,7 +655,7 @@ function formatWeeklyLeaderboardTopN(N = 10) {
     const uname = rec?.username ? rec.username : r.user_display;
     out += `#${r.rank} ${uname} — $${formatMoney(r.this_week_usdc)}\n`;
   }
-  out += `\nReply “stats for <username>” to see your profile.`;
+  out += `\nReply "stats for <username>" to see your profile.`;
   return out;
 }
 
@@ -658,7 +669,7 @@ function formatAllTimeLeaderboardTopN(N = 10) {
     const uname = rec?.username ? rec.username : r.user_display;
     out += `#${r.all_time_rank} ${uname} — $${formatMoney(r.total_usdc)}\n`;
   }
-  out += `\nReply “stats for <username>” to see your profile.`;
+  out += `\nReply "stats for <username>" to see your profile.`;
   return out;
 }
 
@@ -697,12 +708,12 @@ async function formatUserStats(identifier) {
   if (!resolved.ok) {
     // fallback to Neynar if not found (never guess)
     if (resolved.reason === 'ambiguous_base') {
-      return { kind: 'clarify', text: `I found multiple BaseApp profiles that match “${resolved.base}”. Please reply with the exact BaseApp username (example: femiii.base.eth).` };
+      return { kind: 'clarify', text: `I found multiple BaseApp profiles that match "${resolved.base}". Please reply with the exact BaseApp username (example: femiii.base.eth).` };
     }
 
     const neyn = await resolveUserNeynar(identifier);
     if (!neyn.ok) {
-      return { kind: 'clarify', text: `I couldn’t find that BaseApp username. Please reply with the exact BaseApp username (example: femiii.base.eth).` };
+      return { kind: 'clarify', text: `I couldn't find that BaseApp username. Please reply with the exact BaseApp username (example: femiii.base.eth).` };
     }
 
     // We have a Neynar user hydrated object; now choose reward address using their verified addresses
@@ -738,13 +749,21 @@ async function formatUserStats(identifier) {
 
   const startIso = weekStartYmd ? isoAtUtcMidnight(weekStartYmd) : new Date().toISOString();
   const nowIso = new Date().toISOString();
+  
+  // Calculate windows as per miniapp logic
+  const lastWindowStart = addDaysIso(startIso, -7);
+  const lastWindowEnd = startIso;
+  
   // BaseApp activity windows (mirrors miniapp)
-  // Replies must be a SINGLE post, so we keep this output compact.
   let activityThis = null;
+  let activityLast = null;
 
   try {
     if (rec.fid) {
+      // This week: latest_week_start_utc → now
       activityThis = await getBaseAppActivity(rec.fid, startIso, nowIso);
+      // Last reward window: (latest_week_start_utc - 7 days) → latest_week_start_utc
+      activityLast = await getBaseAppActivity(rec.fid, lastWindowStart, lastWindowEnd);
     }
   } catch {
     // leave null; handled below
@@ -752,14 +771,39 @@ async function formatUserStats(identifier) {
 
   const uname = rec.username || identifier;
 
-  // Compact community counters (keep it short)
+  // Community counters
   const followerCount = rec.follower_count ?? rec.raw?.follower_count ?? 0;
+  const followingCount = rec.following_count ?? rec.raw?.following_count ?? 0;
 
-  // Build a SINGLE-post reply (no threads). Keep under 280 chars.
-  const followersShort = Number(followerCount).toLocaleString?.() || String(followerCount);
-  const act = activityThis
-    ? `P${activityThis.casts} L${activityThis.likes} Rc${activityThis.recasts} Rp${activityThis.replies}`
-    : 'BaseApp activity temporarily unavailable';
+  // Format activity blocks
+  const thisWeekRange = formatDateRange(startIso, 'now');
+  const lastWeekRange = formatDateRange(lastWindowStart, lastWindowEnd);
+  
+  const actThisBlock = activityThis 
+    ? [
+        `📱 BASEAPP ACTIVITY (This Week: ${thisWeekRange})`,
+        `📝 Posts: ${activityThis.casts}`,
+        `❤️ Likes received: ${activityThis.likes}`,
+        `🔄 Recasts: ${activityThis.recasts}`,
+        `✒️ Replies: ${activityThis.replies}`,
+      ].join('\n')
+    : `📱 BASEAPP ACTIVITY (This Week: ${thisWeekRange})\n(Activity data temporarily unavailable)`;
+    
+  const actLastBlock = activityLast
+    ? [
+        `📱 BASEAPP ACTIVITY (Last reward window: ${lastWeekRange})`,
+        `📝 Posts: ${activityLast.casts}`,
+        `❤️ Likes received: ${activityLast.likes}`,
+        `🔄 Recasts: ${activityLast.recasts}`,
+        `✒️ Replies: ${activityLast.replies}`,
+      ].join('\n')
+    : `📱 BASEAPP ACTIVITY (Last reward window: ${lastWeekRange})\n(Activity data temporarily unavailable)`;
+
+  const communityBlock = [
+    `👥 COMMUNITY`,
+    `Followers: ${Number(followerCount).toLocaleString?.() || followerCount}`,
+    `Following: ${Number(followingCount).toLocaleString?.() || followingCount}`,
+  ].join('\n');
 
   if (allTime || weekly) {
     const allTimeUsd = allTime?.total_usdc ?? 0;
@@ -771,11 +815,46 @@ async function formatUserStats(identifier) {
     const prevWeekUsd = weekly?.previous_week_usdc ?? 0;
     const change = arrowPct(weekly?.pct_change);
 
-    const out = `📊 baseapp stats: ${uname}\n💰 All-time: $${formatMoney(allTimeUsd)} (#${allTimeRank}) • Weeks ${weeks}\n📈 Week ${weekNumber}: $${formatMoney(thisWeekUsd)} (#${weeklyRank}) • Prev $${formatMoney(prevWeekUsd)} • ${change}\n📱 BaseApp activity (This Week): ${act}\n👥 Followers: ${followersShort}`;
+    const out = [
+      `📊 baseapp creator statistics of ${uname}`,
+      '',
+      '💰 ALL-TIME REWARDS',
+      `Total Earned: $${formatMoney(allTimeUsd)}`,
+      `Rank: #${allTimeRank} 🏆`,
+      `Weeks Earned: ${weeks}`,
+      '',
+      `📈 LATEST WEEK (Week ${weekNumber} — ${weekLabel})`,
+      `Earned: $${formatMoney(thisWeekUsd)}`,
+      `Rank: #${weeklyRank}`,
+      `Previous Week: $${formatMoney(prevWeekUsd)}`,
+      `Change: ${change}`,
+      '',
+      actThisBlock,
+      '',
+      actLastBlock,
+      '',
+      communityBlock,
+      '',
+      '🎉 Keep creating on BaseApp! 🚀',
+    ].join('\n');
+    
     return { kind: 'normal', text: out };
   }
 
-  const out = `📊 baseapp stats: ${uname}\nYou didn’t yet earn creator reward from @baseapp — keep creating 💙\n📱 BaseApp activity (This Week): ${act}\n👥 Followers: ${followersShort}`;
+  const out = [
+    `📊 baseapp creator statistics of ${uname}`,
+    '',
+    `You didn't yet earn creator reward from @baseapp — keep creating, you can earn next week 💙🤝`,
+    '',
+    actThisBlock,
+    '',
+    actLastBlock,
+    '',
+    communityBlock,
+    '',
+    '🎉 Keep creating on BaseApp! 🚀',
+  ].join('\n');
+  
   return { kind: 'normal', text: out };
 }
 
@@ -786,17 +865,17 @@ async function formatUserStats(identifier) {
  */
 async function generateGeneralChat(message) {
   if (!process.env.ANTHROPIC_API_KEY) {
-    return `I can help with BaseApp rewards and social info. Reply “help” to see commands.`;
+    return `I can help with BaseApp rewards and social info. Reply "help" to see commands.`;
   }
 
   const aiResponse = await anthropic.messages.create({
     model: 'claude-sonnet-4-20250514',
-    max_tokens: 280,
+    max_tokens: 500,
     system: `You are the BaseApp rewards bot for X. Be helpful and concise.
 Rules:
 - NEVER output the word "Farcaster". Use "BaseApp" instead.
 - Never invent user stats. If asked for stats, instruct them to provide a BaseApp username.
-- Keep responses under 280 characters.`,
+- Keep responses conversational and helpful.`,
     messages: [{ role: 'user', content: message }],
   });
 
@@ -810,27 +889,14 @@ Rules:
  * Tweet helpers
  * ========================================================
  */
-function truncateTo(text, maxLen) {
-  const s = String(text ?? '');
-  if (s.length <= maxLen) return s;
-  return s.slice(0, Math.max(0, maxLen - 1)).trimEnd() + '…';
-}
-
-// Replies should always be a SINGLE post (no threads).
-// Even if the account has Premium, the API often enforces 280 chars.
-function normalizeReplyText(text) {
-  return truncateTo(text, 280);
-}
-
 async function replyToTweet(tweetId, message) {
-  const tweetText = normalizeReplyText(message);
-  await rwClient.v2.reply(tweetText, tweetId);
+  // Twitter now supports longer tweets with Premium accounts
+  // We'll send as-is and let Twitter handle it
+  await rwClient.v2.reply(message, tweetId);
 }
 
 async function postStandalone(text) {
-  // Keep standalone posts single as well (safer + avoids accidental threads).
-  const tweetText = truncateTo(text, 280);
-  await rwClient.v2.tweet(tweetText);
+  await rwClient.v2.tweet(text);
 }
 
 /**
@@ -1009,6 +1075,7 @@ async function buildDailyPostForRow(row) {
   const weekStart = dataCache.weeklyLeaderboard?.latest_week_start_utc || state.latestWeekStartUtc || '';
   const meta = getWeekMetaByStart(weekStart);
   const weekNumber = meta?.week_number ?? '?';
+  const weekLabel = meta?.week_label ?? weekStart;
 
   const rank = row.rank;
   const rankRangeHint = rank <= 10 ? 'Top 10' : (rank <= 50 ? 'Top 50' : 'Top creators');
@@ -1020,9 +1087,8 @@ async function buildDailyPostForRow(row) {
       const nowIso = new Date().toISOString();
       const a = await getBaseAppActivity(fid, startIso, nowIso);
       activityBlock = [
-        '📱 BaseApp activity (This Week)',
-        `• Posts: ${a.casts} • Likes: ${a.likes}`,
-        `• Recasts: ${a.recasts} • Replies: ${a.replies}`,
+        '📱 This week activity:',
+        `• Posts ${a.casts} • Likes ${a.likes} • Recasts ${a.recasts} • Replies ${a.replies}`,
       ].join('\n');
     } catch {
       // keep unavailable
@@ -1039,10 +1105,10 @@ async function buildDailyPostForRow(row) {
     `📊 All-time: $${formatMoney(allTimeUsd)} (Rank #${allTimeRank})`,
     '',
     activityBlock,
-    '',
     `👥 Followers: ${followers === '—' ? '—' : (Number(followers).toLocaleString?.() || followers)}`,
     '',
-    `Reply “stats for <username>” to check yours.`,
+    `Reply "stats for <username>" to check yours.`,
+    '#BaseApp #Base',
   ].join('\n');
 
   // Standalone posts may include the miniapp link.
