@@ -1,5 +1,5 @@
 {
-  "generated_at_utc": "2026-02-04T22:38:29.313Z",
+  "generated_at_utc": "2026-02-11T21:33:49.925Z",
   "chain": "base",
   "token": {
     "symbol": "USDC",
@@ -9,14 +9,14 @@
   "reward_distributor": "0x3D483c284bA397c1aB05E7f74593a79952a812ac",
   "first_reward_block": "33259888",
   "all_time": {
-    "total_usdc": "454557",
-    "unique_users": 17084
+    "total_usdc": "466832",
+    "unique_users": 17257
   },
   "latest_week": {
-    "week_start_utc": "2026-02-04",
-    "week_end_utc": "2026-02-11",
-    "total_usdc": "12381",
-    "unique_users": 1939,
+    "week_start_utc": "2026-02-11",
+    "week_end_utc": "2026-02-18",
+    "total_usdc": "12275",
+    "unique_users": 1915,
     "breakdown": [
       {
         "reward_usdc": "100",
@@ -27,24 +27,20 @@
         "users": 17
       },
       {
+        "reward_usdc": "30",
+        "users": 1
+      },
+      {
         "reward_usdc": "25",
         "users": 47
       },
       {
         "reward_usdc": "10",
-        "users": 102
+        "users": 99
       },
       {
         "reward_usdc": "5",
-        "users": 1766
-      },
-      {
-        "reward_usdc": "4",
-        "users": 1
-      },
-      {
-        "reward_usdc": "2",
-        "users": 1
+        "users": 1746
       }
     ]
   }
