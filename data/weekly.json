@@ -1,5 +1,5 @@
 {
-  "generated_at_utc": "2026-02-11T21:33:49.925Z",
+  "generated_at_utc": "2026-02-19T02:44:30.848Z",
   "week_keys": [
     "2025-07-23",
     "2025-07-30",
@@ -30,7 +30,8 @@
     "2026-01-21",
     "2026-01-28",
     "2026-02-04",
-    "2026-02-11"
+    "2026-02-11",
+    "2026-02-18"
   ],
   "weeks": [
     {
@@ -302,6 +303,15 @@
       "week_end_utc": "2026-02-18",
       "total_usdc_amount": 12275,
       "total_unique_users": 1915
+    },
+    {
+      "week_number": 31,
+      "week_label": "Week 31 – 18 Feb 2026",
+      "week_start_date_utc": "2026-02-18 00:00",
+      "week_start_utc": "2026-02-18",
+      "week_end_utc": "2026-02-25",
+      "total_usdc_amount": 12245,
+      "total_unique_users": 1912
     }
   ]
 }
